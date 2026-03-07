@@ -107,6 +107,12 @@ pub struct ListJobsInput<'a> {
     pub limit: i64,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ListDatasetExportsInput<'a> {
+    pub export_kind: Option<&'a str>,
+    pub limit: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct JobProgressUpdate {
     pub stage: String,
@@ -278,6 +284,33 @@ impl PgJobStore {
         .context("failed to record dataset export")?;
 
         Ok(record)
+    }
+
+    pub async fn list_dataset_exports(
+        &self,
+        input: ListDatasetExportsInput<'_>,
+    ) -> anyhow::Result<Vec<DatasetExportRecord>> {
+        let limit = if input.limit <= 0 {
+            50
+        } else {
+            input.limit.min(200)
+        };
+        let records = sqlx::query_as::<_, DatasetExportRecord>(
+            r#"
+            SELECT id, job_id, export_kind, manifest_path, schema_version, payload_json, created_at
+            FROM dataset_exports
+            WHERE ($1::text IS NULL OR export_kind = $1)
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(input.export_kind)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list dataset exports")?;
+
+        Ok(records)
     }
 
     pub async fn claim_next_job(&self, worker_id: &str, lease_seconds: i64) -> anyhow::Result<Option<JobRecord>> {

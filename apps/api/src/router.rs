@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
 };
 use backtest::{BacktestJobRequest, PgBacktestStore};
-use jobs::{CreateJobInput, JobSubmitted, JobType, ListJobsInput, PgJobStore};
+use jobs::{CreateJobInput, JobSubmitted, JobType, ListDatasetExportsInput, ListJobsInput, PgJobStore};
 use market::{AreaProfileQuery, BarsQuery, ClickHouseMarketStore, PresetProfileQuery, TicksQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,6 +40,12 @@ struct IngestionJobRequest {
 struct DatasetJobRequest {
     export_kind: String,
     payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatasetExportsQuery {
+    export_kind: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +106,7 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
         .route("/backtests/runs/:run_id/trades", get(get_backtest_trades))
         .route("/backtests/runs/:run_id/analytics", get(get_backtest_analytics))
         .route("/datasets/jobs", post(create_dataset_job))
+        .route("/datasets/exports", get(list_dataset_exports))
         .with_state(state.clone());
 
     Ok(Router::new()
@@ -391,6 +398,22 @@ async fn create_dataset_job(
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
     Ok((StatusCode::ACCEPTED, Json(JobSubmitted { job_id: job.id })))
+}
+
+async fn list_dataset_exports(
+    State(state): State<AppState>,
+    Query(query): Query<DatasetExportsQuery>,
+) -> ApiResult<Json<Value>> {
+    let exports = state
+        .jobs
+        .list_dataset_exports(ListDatasetExportsInput {
+            export_kind: query.export_kind.as_deref(),
+            limit: query.limit.unwrap_or(50),
+        })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    Ok(Json(json!({ "exports": exports })))
 }
 
 fn default_rebuild_target() -> String {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { createDatasetJob, getBacktestRuns, getJob } from "../lib/api";
+import { createDatasetJob, getBacktestRuns, getDatasetExports, getJob } from "../lib/api";
 
 interface DatasetsPanelProps {
   selectedSymbol: string;
@@ -63,7 +63,19 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
     },
     onSuccess: (response) => {
       setActiveJobId(response.job_id);
+      exportsQuery.refetch();
     },
+  });
+
+  const exportsQuery = useQuery({
+    queryKey: ["dataset-exports", exportKind],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set("limit", "12");
+      params.set("export_kind", exportKind);
+      return getDatasetExports(params);
+    },
+    refetchInterval: 4000,
   });
 
   const jobQuery = useQuery({
@@ -242,6 +254,33 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
             ) : null}
           </div>
         ) : null}
+      </article>
+
+      <article className="panel panel-wide">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Recent exports</p>
+            <h2>{exportKind}</h2>
+          </div>
+          <span className="pill">{exportsQuery.data?.exports.length ?? 0} items</span>
+        </div>
+        {exportsQuery.isLoading ? <p>Loading exports…</p> : null}
+        {exportsQuery.isError ? <p className="error-copy">{exportsQuery.error.message}</p> : null}
+        <div className="stack">
+          {exportsQuery.data?.exports.map((datasetExport) => (
+            <div className="job-card" key={datasetExport.id}>
+              <div className="profile-header">
+                <strong>{datasetExport.export_kind}</strong>
+                <span>{new Date(datasetExport.created_at).toLocaleString()}</span>
+              </div>
+              <p className="microcopy">{datasetExport.schema_version}</p>
+              <p className="microcopy">{datasetExport.manifest_path}</p>
+              <pre className="json-card compact-card">
+                {JSON.stringify(datasetExport.payload_json, null, 2)}
+              </pre>
+            </div>
+          ))}
+        </div>
       </article>
     </section>
   );

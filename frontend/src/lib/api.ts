@@ -108,6 +108,16 @@ export interface BacktestAnalytics {
   max_drawdown: number;
 }
 
+export interface DatasetExportRecord {
+  id: string;
+  job_id: string | null;
+  export_kind: string;
+  manifest_path: string;
+  schema_version: string;
+  payload_json: Record<string, unknown>;
+  created_at: string;
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`);
   if (!response.ok) {
@@ -174,6 +184,11 @@ export function createDatasetJob(payload: {
   payload: Record<string, unknown>;
 }) {
   return postJson<typeof payload, { job_id: string }>("/datasets/jobs", payload);
+}
+
+export function getDatasetExports(params?: URLSearchParams) {
+  const suffix = params ? `?${params.toString()}` : "";
+  return fetchJson<{ exports: DatasetExportRecord[] }>(`/datasets/exports${suffix}`);
 }
 
 export function getBars(symbolContract: string, params: URLSearchParams) {
