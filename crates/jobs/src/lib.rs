@@ -77,6 +77,17 @@ pub struct IngestedFileRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+pub struct DatasetExportRecord {
+    pub id: Uuid,
+    pub job_id: Option<Uuid>,
+    pub export_kind: String,
+    pub manifest_path: String,
+    pub schema_version: String,
+    pub payload_json: Value,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateJobInput {
     pub job_type: JobType,
@@ -238,6 +249,33 @@ impl PgJobStore {
         .fetch_optional(&self.pool)
         .await
         .context("failed to load ingested file")?;
+
+        Ok(record)
+    }
+
+    pub async fn record_dataset_export(
+        &self,
+        job_id: Option<Uuid>,
+        export_kind: &str,
+        manifest_path: &str,
+        schema_version: &str,
+        payload_json: Value,
+    ) -> anyhow::Result<DatasetExportRecord> {
+        let record = sqlx::query_as::<_, DatasetExportRecord>(
+            r#"
+            INSERT INTO dataset_exports (job_id, export_kind, manifest_path, schema_version, payload_json)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, job_id, export_kind, manifest_path, schema_version, payload_json, created_at
+            "#,
+        )
+        .bind(job_id)
+        .bind(export_kind)
+        .bind(manifest_path)
+        .bind(schema_version)
+        .bind(payload_json)
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to record dataset export")?;
 
         Ok(record)
     }

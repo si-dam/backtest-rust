@@ -1,5 +1,11 @@
+use std::{fs::File, path::PathBuf, sync::Arc};
+
 use anyhow::Result;
 use app_core::{config::Settings, telemetry::init_tracing};
+use arrow_array::{
+    ArrayRef, Float64Array, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use backtest::{
     build_trade_records, merge_orb_params, simulate_orb_breakout_strategy, summarize_breakout_trades, NewRunInput,
     OrbRunSummary, PgBacktestStore, StrategyBar,
@@ -10,6 +16,7 @@ use market::{
     detect_tick_size, parse_market_data_file, sha256_hex, summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick,
     CanonicalTickRow, ClickHouseMarketStore, ParsedMarketData, TicksQuery,
 };
+use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use tokio::fs;
@@ -82,7 +89,7 @@ async fn dispatch_job(
         "build_bars" => handle_build_bars(settings, jobs, market, job_id, worker_id, payload).await,
         "build_profiles" => handle_build_profiles(settings, jobs, market, job_id, worker_id, payload).await,
         "backtest_run" => handle_backtest_run(settings, jobs, market, backtests, job_id, worker_id, payload).await,
-        "dataset_export" => Ok(json!({ "status": "queued_for_export_implementation", "payload": payload })),
+        "dataset_export" => handle_dataset_export(settings, jobs, market, job_id, worker_id, payload).await,
         other => Err(format!("unknown job type: {other}")),
     }
 }
@@ -520,6 +527,169 @@ async fn run_orb_backtest(
     }))
 }
 
+async fn handle_dataset_export(
+    settings: &Settings,
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
+    payload: &Value,
+) -> std::result::Result<Value, String> {
+    let export_kind = payload
+        .get("export_kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing export_kind".to_string())?;
+    let export_payload = payload
+        .get("payload")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let artifact_root = payload
+        .get("artifact_root")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| settings.artifact_root.clone());
+
+    match export_kind {
+        "bars" => export_bars_dataset(jobs, market, job_id, worker_id, &artifact_root, export_payload).await,
+        other => Err(format!("unsupported export_kind: {other}")),
+    }
+}
+
+async fn export_bars_dataset(
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
+    artifact_root: &PathBuf,
+    payload: Value,
+) -> std::result::Result<Value, String> {
+    let symbol_contract = payload
+        .get("symbol_contract")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "bars export requires payload.symbol_contract".to_string())?;
+    let timeframe = payload
+        .get("timeframe")
+        .and_then(Value::as_str)
+        .unwrap_or("1m")
+        .to_string();
+    let bar_type = payload
+        .get("bar_type")
+        .and_then(Value::as_str)
+        .unwrap_or("time")
+        .to_string();
+    let bar_size = payload
+        .get("bar_size")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let start = serde_json::from_value(payload.get("start").cloned().ok_or_else(|| "bars export requires payload.start".to_string())?)
+        .map_err(|error| format!("invalid export start: {error}"))?;
+    let end = serde_json::from_value(payload.get("end").cloned().ok_or_else(|| "bars export requires payload.end".to_string())?)
+        .map_err(|error| format!("invalid export end: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "loading_export_data",
+        json!({
+            "export_kind": "bars",
+            "symbol_contract": symbol_contract,
+            "timeframe": timeframe,
+            "bar_type": bar_type,
+            "bar_size": bar_size,
+        }),
+    )
+    .await?;
+    let bars = market
+        .load_bars(
+            symbol_contract,
+            &BarsQuery {
+                start,
+                end,
+                timeframe: timeframe.clone(),
+                bar_type: bar_type.clone(),
+                bar_size,
+            },
+        )
+        .await
+        .map_err(|error| format!("failed to load bars for export: {error}"))?;
+
+    let export_dir = artifact_root.join("dataset_exports").join(job_id.to_string());
+    fs::create_dir_all(&export_dir)
+        .await
+        .map_err(|error| format!("failed to create export directory: {error}"))?;
+    let data_path = export_dir.join("bars.parquet");
+    let manifest_path = export_dir.join("manifest.json");
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "writing_export_files",
+        json!({ "data_path": data_path, "row_count": bars.len() }),
+    )
+    .await?;
+    write_bars_parquet(&data_path, &bars).map_err(|error| format!("failed to write bars parquet: {error}"))?;
+
+    let schema_version = "bars.v1";
+    let manifest = json!({
+        "job_id": job_id,
+        "export_kind": "bars",
+        "schema_version": schema_version,
+        "files": [
+            {
+                "kind": "parquet",
+                "path": data_path,
+                "rows": bars.len(),
+            }
+        ],
+        "request": {
+            "symbol_contract": symbol_contract,
+            "timeframe": timeframe,
+            "bar_type": bar_type,
+            "bar_size": bar_size,
+            "start": start,
+            "end": end,
+        },
+        "row_count": bars.len(),
+    });
+
+    let manifest_string = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed to encode manifest: {error}"))?;
+    fs::write(&manifest_path, manifest_string)
+        .await
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "recording_export",
+        json!({ "manifest_path": manifest_path }),
+    )
+    .await?;
+    let export_record = jobs
+        .record_dataset_export(
+            Some(job_id),
+            "bars",
+            manifest_path
+                .to_str()
+                .ok_or_else(|| "manifest path is not valid UTF-8".to_string())?,
+            schema_version,
+            manifest.clone(),
+        )
+        .await
+        .map_err(|error| format!("failed to record dataset export: {error}"))?;
+
+    Ok(json!({
+        "status": "dataset_exported",
+        "export_id": export_record.id,
+        "export_kind": "bars",
+        "manifest_path": manifest_path,
+        "row_count": bars.len(),
+    }))
+}
+
 async fn update_stage(
     jobs: &PgJobStore,
     job_id: Uuid,
@@ -568,4 +738,68 @@ fn bars_to_strategy_bars(rows: &[BarRecord]) -> Vec<StrategyBar> {
             volume: row.volume,
         })
         .collect()
+}
+
+fn write_bars_parquet(path: &PathBuf, rows: &[BarRecord]) -> anyhow::Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::<str>::from("UTC"))),
+            false,
+        ),
+        Field::new("session_date", DataType::Utf8, false),
+        Field::new("symbol_contract", DataType::Utf8, false),
+        Field::new("timeframe", DataType::Utf8, false),
+        Field::new("open", DataType::Float64, false),
+        Field::new("high", DataType::Float64, false),
+        Field::new("low", DataType::Float64, false),
+        Field::new("close", DataType::Float64, false),
+        Field::new("volume", DataType::Float64, false),
+        Field::new("trade_count", DataType::UInt64, false),
+    ]));
+
+    let ts = TimestampMicrosecondArray::from(
+        rows.iter()
+            .map(|row| row.ts.timestamp_micros())
+            .collect::<Vec<_>>(),
+    );
+    let session_dates = StringArray::from(
+        rows.iter()
+            .map(|row| row.session_date.to_string())
+            .collect::<Vec<_>>(),
+    );
+    let symbol_contracts = StringArray::from(
+        rows.iter()
+            .map(|row| row.symbol_contract.clone())
+            .collect::<Vec<_>>(),
+    );
+    let timeframes = StringArray::from(rows.iter().map(|row| row.timeframe.clone()).collect::<Vec<_>>());
+    let opens = Float64Array::from(rows.iter().map(|row| row.open).collect::<Vec<_>>());
+    let highs = Float64Array::from(rows.iter().map(|row| row.high).collect::<Vec<_>>());
+    let lows = Float64Array::from(rows.iter().map(|row| row.low).collect::<Vec<_>>());
+    let closes = Float64Array::from(rows.iter().map(|row| row.close).collect::<Vec<_>>());
+    let volumes = Float64Array::from(rows.iter().map(|row| row.volume).collect::<Vec<_>>());
+    let trade_counts = UInt64Array::from(rows.iter().map(|row| row.trade_count).collect::<Vec<_>>());
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ts) as ArrayRef,
+            Arc::new(session_dates),
+            Arc::new(symbol_contracts),
+            Arc::new(timeframes),
+            Arc::new(opens),
+            Arc::new(highs),
+            Arc::new(lows),
+            Arc::new(closes),
+            Arc::new(volumes),
+            Arc::new(trade_counts),
+        ],
+    )?;
+
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
 }
