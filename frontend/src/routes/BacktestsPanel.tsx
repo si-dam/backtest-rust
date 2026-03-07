@@ -20,6 +20,8 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
   const [stopMode, setStopMode] = useState("or_boundary");
   const [entryMode, setEntryMode] = useState("first_outside");
   const [contracts, setContracts] = useState("1");
+  const [splitEnabled, setSplitEnabled] = useState(false);
+  const [splitAt, setSplitAt] = useState("");
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
@@ -39,6 +41,10 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
     mutationFn: () => {
       const end = new Date();
       const start = new Date(end.getTime() - 1000 * 60 * 60 * 24 * Number(lookbackDays));
+      const resolvedSplitAt =
+        splitEnabled && splitAt
+          ? new Date(splitAt)
+          : new Date(start.getTime() + Math.floor((end.getTime() - start.getTime()) / 2));
       return createBacktestJob({
         name,
         strategy_id: "orb_breakout_v1",
@@ -53,6 +59,14 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
           entry_mode: entryMode,
           contracts: Number(contracts),
           rth_only: true,
+          ...(splitEnabled
+            ? {
+                split: {
+                  enabled: true,
+                  split_at: resolvedSplitAt.toISOString(),
+                },
+              }
+            : {}),
         },
       });
     },
@@ -139,7 +153,32 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             <span className="field-label">Contracts</span>
             <input className="field-input" value={contracts} onChange={(event) => setContracts(event.target.value)} />
           </label>
+          <label className="field">
+            <span className="field-label">Split run</span>
+            <select
+              className="field-input"
+              value={splitEnabled ? "enabled" : "disabled"}
+              onChange={(event) => setSplitEnabled(event.target.value === "enabled")}
+            >
+              <option value="disabled">Disabled</option>
+              <option value="enabled">In-sample / out-of-sample</option>
+            </select>
+          </label>
+          {splitEnabled ? (
+            <label className="field">
+              <span className="field-label">Split at</span>
+              <input
+                className="field-input"
+                type="datetime-local"
+                value={splitAt}
+                onChange={(event) => setSplitAt(event.target.value)}
+              />
+            </label>
+          ) : null}
         </div>
+        {splitEnabled ? (
+          <p className="microcopy">Leave split time blank to split the selected window at its midpoint.</p>
+        ) : null}
         <div className="action-row">
           <button
             className="primary-button"

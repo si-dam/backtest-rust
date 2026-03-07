@@ -156,6 +156,11 @@ pub struct OrbRunSummary {
     pub metrics: Value,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrbSplitConfig {
+    pub split_at: DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct PgBacktestStore {
     pool: PgPool,
@@ -248,7 +253,11 @@ impl PgBacktestStore {
         Ok(())
     }
 
-    pub async fn insert_trades(&self, run_id: Uuid, trades: &[NewTradeInput]) -> anyhow::Result<()> {
+    pub async fn insert_trades(
+        &self,
+        run_id: Uuid,
+        trades: &[NewTradeInput],
+    ) -> anyhow::Result<()> {
         for trade in trades {
             sqlx::query(
                 r#"
@@ -291,10 +300,23 @@ impl PgBacktestStore {
 
     pub async fn build_analytics(&self, run_id: Uuid) -> anyhow::Result<BacktestAnalytics> {
         let trades = self.get_run_trades(run_id).await?;
-        let wins = trades.iter().filter(|trade| trade.pnl.unwrap_or_default() > 0.0).count();
-        let losses = trades.iter().filter(|trade| trade.pnl.unwrap_or_default() < 0.0).count();
-        let total_pnl = trades.iter().map(|trade| trade.pnl.unwrap_or_default()).sum::<f64>();
-        let avg_pnl = if trades.is_empty() { 0.0 } else { total_pnl / trades.len() as f64 };
+        let wins = trades
+            .iter()
+            .filter(|trade| trade.pnl.unwrap_or_default() > 0.0)
+            .count();
+        let losses = trades
+            .iter()
+            .filter(|trade| trade.pnl.unwrap_or_default() < 0.0)
+            .count();
+        let total_pnl = trades
+            .iter()
+            .map(|trade| trade.pnl.unwrap_or_default())
+            .sum::<f64>();
+        let avg_pnl = if trades.is_empty() {
+            0.0
+        } else {
+            total_pnl / trades.len() as f64
+        };
 
         let mut running = 0.0_f64;
         let mut peak = 0.0_f64;
@@ -329,9 +351,16 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
 
     let start = parse_utc_datetime(get("start").context("start is required for orb_breakout_v1")?)?;
     let end = parse_utc_datetime(get("end").context("end is required for orb_breakout_v1")?)?;
-    let (start, end) = if end < start { (end, start) } else { (start, end) };
+    let (start, end) = if end < start {
+        (end, start)
+    } else {
+        (start, end)
+    };
 
-    let timeframe = get("timeframe").and_then(Value::as_str).unwrap_or("1m").to_lowercase();
+    let timeframe = get("timeframe")
+        .and_then(Value::as_str)
+        .unwrap_or("1m")
+        .to_lowercase();
     if !ALLOWED_TIMEFRAMES.contains(&timeframe.as_str()) {
         bail!("unsupported strategy timeframe: {timeframe}");
     }
@@ -353,7 +382,10 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
     parse_hhmmss(&session_start)?;
     parse_hhmmss(&session_end)?;
 
-    let stop_mode = match get("stop_mode").and_then(Value::as_str).unwrap_or("or_boundary") {
+    let stop_mode = match get("stop_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("or_boundary")
+    {
         "or_boundary" => StopMode::OrBoundary,
         "or_mid" => StopMode::OrMid,
         other => bail!("stop_mode must be 'or_boundary' or 'or_mid', got {other}"),
@@ -364,7 +396,10 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
         bail!("tp_r_multiple must be greater than 0");
     }
 
-    let entry_mode = match get("entry_mode").and_then(Value::as_str).unwrap_or("first_outside") {
+    let entry_mode = match get("entry_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("first_outside")
+    {
         "first_outside" => EntryMode::FirstOutside,
         "reentry_after_stop" => EntryMode::ReentryAfterStop,
         other => bail!("entry_mode must be 'first_outside' or 'reentry_after_stop', got {other}"),
@@ -400,7 +435,37 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
     })
 }
 
-pub fn simulate_orb_breakout_strategy(bars: &[StrategyBar], params: &OrbStrategyParams) -> anyhow::Result<Vec<StrategyTrade>> {
+pub fn parse_orb_split_config(
+    params: &Value,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> anyhow::Result<Option<OrbSplitConfig>> {
+    let Some(split) = params.get("split") else {
+        return Ok(None);
+    };
+    let Some(split) = split.as_object() else {
+        return Ok(None);
+    };
+    if !coerce_bool(split.get("enabled"), false)? {
+        return Ok(None);
+    }
+
+    let split_at = parse_utc_datetime(
+        split
+            .get("split_at")
+            .context("split.split_at is required when split.enabled is true")?,
+    )?;
+    if split_at <= start || split_at >= end {
+        bail!("split.split_at must be strictly between start and end");
+    }
+
+    Ok(Some(OrbSplitConfig { split_at }))
+}
+
+pub fn simulate_orb_breakout_strategy(
+    bars: &[StrategyBar],
+    params: &OrbStrategyParams,
+) -> anyhow::Result<Vec<StrategyTrade>> {
     if bars.is_empty() {
         return Ok(Vec::new());
     }
@@ -418,13 +483,17 @@ pub fn simulate_orb_breakout_strategy(bars: &[StrategyBar], params: &OrbStrategy
 
     let mut trades = Vec::new();
     for day_bars in grouped {
-        let Some(levels) = compute_opening_range(&day_bars, params.ib_minutes, session_start, timezone) else {
+        let Some(levels) =
+            compute_opening_range(&day_bars, params.ib_minutes, session_start, timezone)
+        else {
             continue;
         };
 
         let mut search_after: Option<DateTime<Utc>> = None;
         loop {
-            let Some((entry_ts, side)) = find_first_breakout_signal(&day_bars, &levels, session_end, timezone, search_after) else {
+            let Some((entry_ts, side)) =
+                find_first_breakout_signal(&day_bars, &levels, session_end, timezone, search_after)
+            else {
                 break;
             };
 
@@ -444,12 +513,17 @@ pub fn simulate_orb_breakout_strategy(bars: &[StrategyBar], params: &OrbStrategy
                 Side::Short => entry_price - params.tp_r_multiple * risk,
             };
 
-            let future = day_bars.iter().filter(|bar| bar.ts > entry_ts).cloned().collect::<Vec<_>>();
+            let future = day_bars
+                .iter()
+                .filter(|bar| bar.ts > entry_ts)
+                .cloned()
+                .collect::<Vec<_>>();
             if future.is_empty() {
                 break;
             }
 
-            let (exit_ts, exit_price, exit_reason) = simulate_exit(&future, side, stop, target, session_end, timezone)?;
+            let (exit_ts, exit_price, exit_reason) =
+                simulate_exit(&future, side, stop, target, session_end, timezone)?;
             let signed = if side == Side::Long { 1.0 } else { -1.0 };
             let pnl = (exit_price - entry_price) * signed * f64::from(params.contracts);
             let r_multiple = pnl / (risk * f64::from(params.contracts));
@@ -537,7 +611,11 @@ pub fn summarize_breakout_trades(trades: &[StrategyTrade]) -> Value {
     })
 }
 
-pub fn build_trade_records(run_id: Uuid, params: &OrbStrategyParams, trades: &[StrategyTrade]) -> Vec<NewTradeInput> {
+pub fn build_trade_records(
+    run_id: Uuid,
+    params: &OrbStrategyParams,
+    trades: &[StrategyTrade],
+) -> Vec<NewTradeInput> {
     trades
         .iter()
         .map(|trade| {
@@ -573,16 +651,25 @@ pub fn build_trade_records(run_id: Uuid, params: &OrbStrategyParams, trades: &[S
 
 fn parse_utc_datetime(value: &Value) -> anyhow::Result<DateTime<Utc>> {
     let raw = value.as_str().context("datetime values must be strings")?;
-    let parsed = DateTime::parse_from_rfc3339(raw).context("datetime must include timezone offset")?;
+    let parsed =
+        DateTime::parse_from_rfc3339(raw).context("datetime must include timezone offset")?;
     Ok(parsed.with_timezone(&Utc))
 }
 
 fn coerce_bool(value: Option<&Value>, default: bool) -> anyhow::Result<bool> {
-    let Some(value) = value else { return Ok(default) };
+    let Some(value) = value else {
+        return Ok(default);
+    };
     if let Some(value) = value.as_bool() {
         return Ok(value);
     }
-    match value.as_str().unwrap_or_default().trim().to_lowercase().as_str() {
+    match value
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
         "1" | "true" | "t" | "yes" | "y" | "on" => Ok(true),
         "0" | "false" | "f" | "no" | "n" | "off" => Ok(false),
         _ => bail!("invalid boolean value: {value}"),
@@ -590,7 +677,8 @@ fn coerce_bool(value: Option<&Value>, default: bool) -> anyhow::Result<bool> {
 }
 
 fn parse_hhmmss(value: &str) -> anyhow::Result<NaiveTime> {
-    NaiveTime::parse_from_str(value, "%H:%M:%S").with_context(|| format!("invalid HH:MM:SS time: {value}"))
+    NaiveTime::parse_from_str(value, "%H:%M:%S")
+        .with_context(|| format!("invalid HH:MM:SS time: {value}"))
 }
 
 #[derive(Clone)]
@@ -614,7 +702,10 @@ fn group_session_bars(
         if time < session_start || time > session_end {
             continue;
         }
-        grouped.entry(local.date_naive()).or_default().push(bar.clone());
+        grouped
+            .entry(local.date_naive())
+            .or_default()
+            .push(bar.clone());
     }
     grouped.into_values().collect()
 }
@@ -740,8 +831,8 @@ fn simulate_exit(
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_orb_params, simulate_orb_breakout_strategy, summarize_breakout_trades, EntryMode, OrbStrategyParams,
-        StopMode, StrategyBar,
+        merge_orb_params, parse_orb_split_config, simulate_orb_breakout_strategy,
+        summarize_breakout_trades, EntryMode, OrbStrategyParams, StopMode, StrategyBar,
     };
     use chrono::{TimeZone, Utc};
     use chrono_tz::America::New_York;
@@ -767,21 +858,91 @@ mod tests {
 
     fn bars() -> Vec<StrategyBar> {
         vec![
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 0).unwrap(), open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 10.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 0).unwrap(), open: 100.0, high: 103.0, low: 100.0, close: 102.0, volume: 20.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 33, 0).unwrap(), open: 102.0, high: 108.0, low: 101.0, close: 106.0, volume: 20.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 34, 0).unwrap(), open: 106.0, high: 107.0, low: 105.0, close: 106.0, volume: 20.0 },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 0).unwrap(),
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.0,
+                volume: 10.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 0).unwrap(),
+                open: 100.0,
+                high: 103.0,
+                low: 100.0,
+                close: 102.0,
+                volume: 20.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 33, 0).unwrap(),
+                open: 102.0,
+                high: 108.0,
+                low: 101.0,
+                close: 106.0,
+                volume: 20.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 34, 0).unwrap(),
+                open: 106.0,
+                high: 107.0,
+                low: 105.0,
+                close: 106.0,
+                volume: 20.0,
+            },
         ]
     }
 
     fn bars_reentry_case() -> Vec<StrategyBar> {
         vec![
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 0).unwrap(), open: 100.0, high: 101.0, low: 99.0, close: 100.0, volume: 10.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 0).unwrap(), open: 100.0, high: 103.0, low: 101.0, close: 102.0, volume: 20.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 33, 0).unwrap(), open: 102.0, high: 103.0, low: 98.0, close: 99.0, volume: 20.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 34, 0).unwrap(), open: 98.0, high: 99.0, low: 97.0, close: 98.0, volume: 20.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 35, 0).unwrap(), open: 98.0, high: 99.0, low: 95.0, close: 96.0, volume: 20.0 },
-            StrategyBar { ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 36, 0).unwrap(), open: 95.0, high: 94.0, low: 91.0, close: 92.0, volume: 20.0 },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 0).unwrap(),
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.0,
+                volume: 10.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 0).unwrap(),
+                open: 100.0,
+                high: 103.0,
+                low: 101.0,
+                close: 102.0,
+                volume: 20.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 33, 0).unwrap(),
+                open: 102.0,
+                high: 103.0,
+                low: 98.0,
+                close: 99.0,
+                volume: 20.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 34, 0).unwrap(),
+                open: 98.0,
+                high: 99.0,
+                low: 97.0,
+                close: 98.0,
+                volume: 20.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 35, 0).unwrap(),
+                open: 98.0,
+                high: 99.0,
+                low: 95.0,
+                close: 96.0,
+                volume: 20.0,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 36, 0).unwrap(),
+                open: 95.0,
+                high: 94.0,
+                low: 91.0,
+                close: 92.0,
+                volume: 20.0,
+            },
         ]
     }
 
@@ -823,5 +984,45 @@ mod tests {
         assert_eq!(summary["trades"], 1);
         assert_eq!(summary["wins"], 1);
         assert_eq!(summary["full_tp_wins"], 1);
+    }
+
+    #[test]
+    fn split_config_is_parsed_when_enabled() {
+        let params = base_params();
+        let split = parse_orb_split_config(
+            &json!({
+                "split": {
+                    "enabled": true,
+                    "split_at": "2026-02-18T18:00:00Z"
+                }
+            }),
+            params.start,
+            params.end,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            split.split_at,
+            Utc.with_ymd_and_hms(2026, 2, 18, 18, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn split_config_rejects_out_of_range_boundary() {
+        let params = base_params();
+        let error = parse_orb_split_config(
+            &json!({
+                "split": {
+                    "enabled": true,
+                    "split_at": "2026-02-18T14:00:00Z"
+                }
+            }),
+            params.start,
+            params.end,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("split.split_at"));
     }
 }

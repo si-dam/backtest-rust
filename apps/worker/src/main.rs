@@ -7,14 +7,16 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use backtest::{
-    build_trade_records, merge_orb_params, simulate_orb_breakout_strategy, summarize_breakout_trades, NewRunInput,
-    OrbRunSummary, PgBacktestStore, StrategyBar,
+    build_trade_records, merge_orb_params, parse_orb_split_config, simulate_orb_breakout_strategy,
+    summarize_breakout_trades, NewRunInput, OrbRunSummary, PgBacktestStore, StrategyBar,
 };
+use chrono::{DateTime, Utc};
 use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
 use market::{
-    build_non_time_bars_from_ticks, build_profiles_for_ticks, build_time_bars_from_ticks, derive_symbol_root,
-    detect_tick_size, parse_market_data_file, sha256_hex, summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick,
-    CanonicalTickRow, ClickHouseMarketStore, ParsedMarketData, TicksQuery,
+    build_non_time_bars_from_ticks, build_profiles_for_ticks, build_time_bars_from_ticks,
+    derive_symbol_root, detect_tick_size, parse_market_data_file, sha256_hex,
+    summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick, CanonicalTickRow,
+    ClickHouseMarketStore, ParsedMarketData, TicksQuery,
 };
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
@@ -22,6 +24,14 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::fs;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
+
+#[derive(Clone, Debug)]
+struct OrbRunSegment {
+    label: Option<&'static str>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    split_meta: Option<Value>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,7 +42,8 @@ async fn main() -> Result<()> {
         .max_connections(4)
         .connect_lazy(&settings.database_url)?;
     let jobs = PgJobStore::new(pool.clone());
-    let market = ClickHouseMarketStore::new(&settings.clickhouse_url, &settings.clickhouse_database);
+    let market =
+        ClickHouseMarketStore::new(&settings.clickhouse_url, &settings.clickhouse_database);
     let backtests = PgBacktestStore::new(pool);
     let worker_id = format!("runtime-worker-{}", std::process::id());
     let poll_interval = Duration::from_millis(settings.worker_poll_interval_ms);
@@ -87,9 +98,18 @@ async fn dispatch_job(
     match job_type {
         "ingestion" => handle_ingestion(settings, jobs, market, job_id, worker_id, payload).await,
         "build_bars" => handle_build_bars(settings, jobs, market, job_id, worker_id, payload).await,
-        "build_profiles" => handle_build_profiles(settings, jobs, market, job_id, worker_id, payload).await,
-        "backtest_run" => handle_backtest_run(settings, jobs, market, backtests, job_id, worker_id, payload).await,
-        "dataset_export" => handle_dataset_export(settings, jobs, market, job_id, worker_id, payload).await,
+        "build_profiles" => {
+            handle_build_profiles(settings, jobs, market, job_id, worker_id, payload).await
+        }
+        "backtest_run" => {
+            handle_backtest_run(
+                settings, jobs, market, backtests, job_id, worker_id, payload,
+            )
+            .await
+        }
+        "dataset_export" => {
+            handle_dataset_export(settings, jobs, market, job_id, worker_id, payload).await
+        }
         other => Err(format!("unknown job type: {other}")),
     }
 }
@@ -115,8 +135,13 @@ async fn handle_ingestion(
         .and_then(Value::as_str)
         .ok_or_else(|| "missing file_path".to_string())?;
     let symbol_contract = payload.get("symbol_contract").and_then(Value::as_str);
-    let rebuild = payload.get("rebuild").and_then(Value::as_bool).unwrap_or(false);
-    let bytes = fs::read(file_path).await.map_err(|error| format!("failed to read file: {error}"))?;
+    let rebuild = payload
+        .get("rebuild")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let bytes = fs::read(file_path)
+        .await
+        .map_err(|error| format!("failed to read file: {error}"))?;
     let file_hash = sha256_hex(&bytes);
     if let Some(existing) = jobs
         .get_ingested_file(file_path)
@@ -132,12 +157,26 @@ async fn handle_ingestion(
             }));
         }
         if !rebuild && existing.source_hash != file_hash {
-            return Err("source path already exists with a different hash; resubmit with rebuild=true".to_string());
+            return Err(
+                "source path already exists with a different hash; resubmit with rebuild=true"
+                    .to_string(),
+            );
         }
     }
-    update_stage(jobs, job_id, worker_id, "parsing_source", json!({ "hash": file_hash })).await?;
-    let parsed = parse_market_data_file(std::path::Path::new(file_path), settings.dataset_timezone, symbol_contract)
-        .map_err(|error| format!("failed to parse market data file: {error}"))?;
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "parsing_source",
+        json!({ "hash": file_hash }),
+    )
+    .await?;
+    let parsed = parse_market_data_file(
+        std::path::Path::new(file_path),
+        settings.dataset_timezone,
+        symbol_contract,
+    )
+    .map_err(|error| format!("failed to parse market data file: {error}"))?;
     let summary = summarize_parsed_data(std::path::Path::new(file_path), &parsed);
     let tick_size = summary
         .symbol_contract
@@ -159,7 +198,10 @@ async fn handle_ingestion(
             let canonical_rows = ticks
                 .iter()
                 .cloned()
-                .map(|tick| tick.with_dataset_timezone(settings.dataset_timezone).with_source_file(source_name.clone()))
+                .map(|tick| {
+                    tick.with_dataset_timezone(settings.dataset_timezone)
+                        .with_source_file(source_name.clone())
+                })
                 .map(CanonicalTickRow::from)
                 .collect::<Vec<_>>();
             if rebuild {
@@ -173,8 +215,12 @@ async fn handle_ingestion(
                 .await
                 .map_err(|error| format!("failed to insert ticks: {error}"))?;
 
-            let first = ticks.first().ok_or_else(|| "tick dataset was empty".to_string())?;
-            let last = ticks.last().ok_or_else(|| "tick dataset was empty".to_string())?;
+            let first = ticks
+                .first()
+                .ok_or_else(|| "tick dataset was empty".to_string())?;
+            let last = ticks
+                .last()
+                .ok_or_else(|| "tick dataset was empty".to_string())?;
             let symbol = summary
                 .symbol_contract
                 .clone()
@@ -183,9 +229,15 @@ async fn handle_ingestion(
             jobs.upsert_symbol(&symbol, &derive_symbol_root(&symbol), None, Some(tick_size))
                 .await
                 .map_err(|error| format!("failed to upsert symbol: {error}"))?;
-            jobs.record_ingested_file(file_path, &file_hash, &summary.schema_kind, Some(&symbol), summary.row_count as i64)
-                .await
-                .map_err(|error| format!("failed to record ingested file: {error}"))?;
+            jobs.record_ingested_file(
+                file_path,
+                &file_hash,
+                &summary.schema_kind,
+                Some(&symbol),
+                summary.row_count as i64,
+            )
+            .await
+            .map_err(|error| format!("failed to record ingested file: {error}"))?;
 
             update_stage(
                 jobs,
@@ -232,7 +284,11 @@ async fn handle_ingestion(
                 json!({ "rows": bars.len(), "timeframe": "1m" }),
             )
             .await?;
-            if let (Some(first), Some(last), Some(symbol)) = (bars.first(), bars.last(), summary.symbol_contract.as_deref()) {
+            if let (Some(first), Some(last), Some(symbol)) = (
+                bars.first(),
+                bars.last(),
+                summary.symbol_contract.as_deref(),
+            ) {
                 market
                     .replace_time_bars(symbol, "1m", first.ts, last.ts, &bars)
                     .await
@@ -247,9 +303,15 @@ async fn handle_ingestion(
                 jobs.upsert_symbol(symbol, &derive_symbol_root(symbol), None, Some(tick_size))
                     .await
                     .map_err(|error| format!("failed to upsert symbol: {error}"))?;
-                jobs.record_ingested_file(file_path, &file_hash, &summary.schema_kind, Some(symbol), summary.row_count as i64)
-                    .await
-                    .map_err(|error| format!("failed to record ingested file: {error}"))?;
+                jobs.record_ingested_file(
+                    file_path,
+                    &file_hash,
+                    &summary.schema_kind,
+                    Some(symbol),
+                    summary.row_count as i64,
+                )
+                .await
+                .map_err(|error| format!("failed to record ingested file: {error}"))?;
             }
         }
     }
@@ -273,11 +335,24 @@ async fn handle_build_bars(
         .get("symbol_contract")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing symbol_contract".to_string())?;
-    let start = serde_json::from_value(payload.get("start").cloned().ok_or_else(|| "missing start".to_string())?)
-        .map_err(|error| format!("invalid start: {error}"))?;
-    let end = serde_json::from_value(payload.get("end").cloned().ok_or_else(|| "missing end".to_string())?)
-        .map_err(|error| format!("invalid end: {error}"))?;
-    let tick_size = payload.get("tick_size").and_then(Value::as_f64).unwrap_or(0.25);
+    let start = serde_json::from_value(
+        payload
+            .get("start")
+            .cloned()
+            .ok_or_else(|| "missing start".to_string())?,
+    )
+    .map_err(|error| format!("invalid start: {error}"))?;
+    let end = serde_json::from_value(
+        payload
+            .get("end")
+            .cloned()
+            .ok_or_else(|| "missing end".to_string())?,
+    )
+    .map_err(|error| format!("invalid end: {error}"))?;
+    let tick_size = payload
+        .get("tick_size")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.25);
 
     update_stage(
         jobs,
@@ -303,8 +378,13 @@ async fn handle_build_bars(
             json!({ "symbol_contract": symbol_contract, "timeframe": timeframe }),
         )
         .await?;
-        let bars = build_time_bars_from_ticks(&ticks, symbol_contract, timeframe, settings.dataset_timezone)
-            .map_err(|error| format!("failed to build {timeframe} bars: {error}"))?;
+        let bars = build_time_bars_from_ticks(
+            &ticks,
+            symbol_contract,
+            timeframe,
+            settings.dataset_timezone,
+        )
+        .map_err(|error| format!("failed to build {timeframe} bars: {error}"))?;
         market
             .replace_time_bars(symbol_contract, timeframe, start, end, &bars)
             .await
@@ -313,7 +393,12 @@ async fn handle_build_bars(
     }
 
     let mut inserted_non_time = Vec::new();
-    for (bar_type, bar_size) in [("tick", 1500_u32), ("volume", 500_u32), ("volume", 1000_u32), ("range", 40_u32)] {
+    for (bar_type, bar_size) in [
+        ("tick", 1500_u32),
+        ("volume", 500_u32),
+        ("volume", 1000_u32),
+        ("range", 40_u32),
+    ] {
         update_stage(
             jobs,
             job_id,
@@ -322,13 +407,21 @@ async fn handle_build_bars(
             json!({ "symbol_contract": symbol_contract, "bar_type": bar_type, "bar_size": bar_size }),
         )
         .await?;
-        let bars = build_non_time_bars_from_ticks(&ticks, symbol_contract, bar_type, bar_size, tick_size, settings.dataset_timezone)
-            .map_err(|error| format!("failed to build {bar_type}:{bar_size} bars: {error}"))?;
+        let bars = build_non_time_bars_from_ticks(
+            &ticks,
+            symbol_contract,
+            bar_type,
+            bar_size,
+            tick_size,
+            settings.dataset_timezone,
+        )
+        .map_err(|error| format!("failed to build {bar_type}:{bar_size} bars: {error}"))?;
         market
             .replace_non_time_bars(symbol_contract, bar_type, bar_size, start, end, &bars)
             .await
             .map_err(|error| format!("failed to replace {bar_type}:{bar_size} bars: {error}"))?;
-        inserted_non_time.push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
+        inserted_non_time
+            .push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
     }
 
     Ok(json!({
@@ -351,16 +444,29 @@ async fn handle_build_profiles(
         .get("symbol_contract")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing symbol_contract".to_string())?;
-    let start = serde_json::from_value(payload.get("start").cloned().ok_or_else(|| "missing start".to_string())?)
-        .map_err(|error| format!("invalid start: {error}"))?;
-    let end = serde_json::from_value(payload.get("end").cloned().ok_or_else(|| "missing end".to_string())?)
-        .map_err(|error| format!("invalid end: {error}"))?;
+    let start = serde_json::from_value(
+        payload
+            .get("start")
+            .cloned()
+            .ok_or_else(|| "missing start".to_string())?,
+    )
+    .map_err(|error| format!("invalid start: {error}"))?;
+    let end = serde_json::from_value(
+        payload
+            .get("end")
+            .cloned()
+            .ok_or_else(|| "missing end".to_string())?,
+    )
+    .map_err(|error| format!("invalid end: {error}"))?;
     let profile_timezone = payload
         .get("profile_timezone")
         .and_then(Value::as_str)
         .and_then(|value| value.parse().ok())
         .unwrap_or(settings.dataset_timezone);
-    let tick_size = payload.get("tick_size").and_then(Value::as_f64).unwrap_or(0.25);
+    let tick_size = payload
+        .get("tick_size")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.25);
 
     update_stage(
         jobs,
@@ -385,7 +491,13 @@ async fn handle_build_profiles(
     .await?;
     let profiles = build_profiles_for_ticks(symbol_contract, &ticks, profile_timezone, tick_size);
     market
-        .replace_profiles_in_range(symbol_contract, profile_timezone.name(), start, end, &profiles)
+        .replace_profiles_in_range(
+            symbol_contract,
+            profile_timezone.name(),
+            start,
+            end,
+            &profiles,
+        )
         .await
         .map_err(|error| format!("failed to persist profiles: {error}"))?;
 
@@ -421,33 +533,93 @@ async fn handle_backtest_run(
     let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
     let orb_params = merge_orb_params(&params, settings.dataset_timezone)
         .map_err(|error| format!("invalid ORB params: {error}"))?;
+    let split_config = parse_orb_split_config(&params, orb_params.start, orb_params.end)
+        .map_err(|error| format!("invalid ORB params: {error}"))?;
+    let split_group_id = split_config.as_ref().map(|_| Uuid::new_v4().to_string());
+    let segments = orb_segments(
+        &orb_params,
+        split_config.as_ref(),
+        split_group_id.as_deref(),
+    );
 
     update_stage(
         jobs,
         job_id,
         worker_id,
         "creating_backtest_run",
-        json!({ "strategy_id": strategy_id, "symbol_contract": orb_params.symbol_contract }),
+        json!({
+            "strategy_id": strategy_id,
+            "symbol_contract": orb_params.symbol_contract,
+            "segments": segments.len(),
+        }),
     )
     .await?;
-    let run = backtests
-        .create_run(NewRunInput {
-            job_id: Some(job_id),
-            strategy_id: strategy_id.to_string(),
-            name,
-            params_json: json!(orb_params),
-        })
-        .await
-        .map_err(|error| format!("failed to create backtest run: {error}"))?;
 
-    let result = run_orb_backtest(settings, jobs, market, backtests, job_id, worker_id, run.id, orb_params).await;
-    if let Err(error) = &result {
-        backtests
-            .fail_run(run.id, error)
+    let mut created_run_ids = Vec::with_capacity(segments.len());
+    let mut total_trades = 0usize;
+
+    for segment in segments {
+        let mut segment_params = orb_params.clone();
+        segment_params.start = segment.start;
+        segment_params.end = segment.end;
+
+        let run_name = segment
+            .label
+            .map(|label| format!("{name} [{}]", label.to_uppercase()))
+            .unwrap_or_else(|| name.clone());
+        let params_json = params_json_for_segment(&segment_params, segment.split_meta.clone());
+
+        let run = backtests
+            .create_run(NewRunInput {
+                job_id: Some(job_id),
+                strategy_id: strategy_id.to_string(),
+                name: run_name,
+                params_json,
+            })
             .await
-            .map_err(|store_error| format!("failed to mark backtest run as failed: {store_error}"))?;
+            .map_err(|error| format!("failed to create backtest run: {error}"))?;
+
+        let result = run_orb_backtest(
+            settings,
+            jobs,
+            market,
+            backtests,
+            job_id,
+            worker_id,
+            run.id,
+            segment_params,
+            segment.label,
+        )
+        .await;
+        if let Err(error) = &result {
+            backtests
+                .fail_run(run.id, error)
+                .await
+                .map_err(|store_error| {
+                    format!("failed to mark backtest run as failed: {store_error}")
+                })?;
+        }
+        let summary = result?;
+        created_run_ids.push(run.id);
+        total_trades += summary.trade_count;
     }
-    result
+
+    let mut response = json!({
+        "run_id": created_run_ids.first(),
+        "run_ids": created_run_ids,
+        "mode": "run",
+        "strategy_id": strategy_id,
+        "trade_count": total_trades,
+        "created_runs": created_run_ids.len(),
+        "failed_runs": 0,
+    });
+    if let Some(group_id) = split_group_id {
+        response
+            .as_object_mut()
+            .expect("backtest split response should be an object")
+            .insert("split_group_id".to_string(), json!(group_id));
+    }
+    Ok(response)
 }
 
 async fn run_orb_backtest(
@@ -459,7 +631,8 @@ async fn run_orb_backtest(
     worker_id: &str,
     run_id: Uuid,
     params: backtest::OrbStrategyParams,
-) -> std::result::Result<Value, String> {
+    segment_label: Option<&str>,
+) -> std::result::Result<OrbRunSummary, String> {
     update_stage(
         jobs,
         job_id,
@@ -499,8 +672,23 @@ async fn run_orb_backtest(
     .await?;
     let trades = simulate_orb_breakout_strategy(&strategy_bars, &params)
         .map_err(|error| format!("failed to simulate ORB breakout: {error}"))?;
-    let metrics = summarize_breakout_trades(&trades);
-    let trade_records = build_trade_records(run_id, &params, &trades);
+    let mut metrics = summarize_breakout_trades(&trades);
+    if let Some(segment) = segment_label {
+        metrics
+            .as_object_mut()
+            .expect("backtest metrics should be an object")
+            .insert("segment".to_string(), json!(segment));
+    }
+    let mut trade_records = build_trade_records(run_id, &params, &trades);
+    if let Some(segment) = segment_label {
+        for trade in &mut trade_records {
+            trade
+                .notes_json
+                .as_object_mut()
+                .expect("trade notes should be an object")
+                .insert("segment".to_string(), json!(segment));
+        }
+    }
 
     update_stage(
         jobs,
@@ -519,12 +707,65 @@ async fn run_orb_backtest(
         .await
         .map_err(|error| format!("failed to complete backtest run: {error}"))?;
 
-    Ok(json!(OrbRunSummary {
+    Ok(OrbRunSummary {
         strategy_id: "orb_breakout_v1".to_string(),
         run_id,
         trade_count: trades.len(),
         metrics,
-    }))
+    })
+}
+
+fn orb_segments(
+    params: &backtest::OrbStrategyParams,
+    split_config: Option<&backtest::OrbSplitConfig>,
+    split_group_id: Option<&str>,
+) -> Vec<OrbRunSegment> {
+    match split_config {
+        Some(split) => vec![
+            OrbRunSegment {
+                label: Some("is"),
+                start: params.start,
+                end: split.split_at,
+                split_meta: Some(json!({
+                    "enabled": true,
+                    "split_at": split.split_at,
+                    "segment": "is",
+                    "group_id": split_group_id,
+                })),
+            },
+            OrbRunSegment {
+                label: Some("oos"),
+                start: split.split_at,
+                end: params.end,
+                split_meta: Some(json!({
+                    "enabled": true,
+                    "split_at": split.split_at,
+                    "segment": "oos",
+                    "group_id": split_group_id,
+                })),
+            },
+        ],
+        None => vec![OrbRunSegment {
+            label: None,
+            start: params.start,
+            end: params.end,
+            split_meta: None,
+        }],
+    }
+}
+
+fn params_json_for_segment(
+    params: &backtest::OrbStrategyParams,
+    split_meta: Option<Value>,
+) -> Value {
+    let mut payload = json!(params);
+    if let Some(split_meta) = split_meta {
+        payload
+            .as_object_mut()
+            .expect("segment params should serialize to an object")
+            .insert("split".to_string(), split_meta);
+    }
+    payload
 }
 
 async fn handle_dataset_export(
@@ -539,10 +780,7 @@ async fn handle_dataset_export(
         .get("export_kind")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing export_kind".to_string())?;
-    let export_payload = payload
-        .get("payload")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let export_payload = payload.get("payload").cloned().unwrap_or_else(|| json!({}));
     let artifact_root = payload
         .get("artifact_root")
         .and_then(Value::as_str)
@@ -550,7 +788,17 @@ async fn handle_dataset_export(
         .unwrap_or_else(|| settings.artifact_root.clone());
 
     match export_kind {
-        "bars" => export_bars_dataset(jobs, market, job_id, worker_id, &artifact_root, export_payload).await,
+        "bars" => {
+            export_bars_dataset(
+                jobs,
+                market,
+                job_id,
+                worker_id,
+                &artifact_root,
+                export_payload,
+            )
+            .await
+        }
         other => Err(format!("unsupported export_kind: {other}")),
     }
 }
@@ -581,10 +829,20 @@ async fn export_bars_dataset(
         .get("bar_size")
         .and_then(Value::as_u64)
         .map(|value| value as u32);
-    let start = serde_json::from_value(payload.get("start").cloned().ok_or_else(|| "bars export requires payload.start".to_string())?)
-        .map_err(|error| format!("invalid export start: {error}"))?;
-    let end = serde_json::from_value(payload.get("end").cloned().ok_or_else(|| "bars export requires payload.end".to_string())?)
-        .map_err(|error| format!("invalid export end: {error}"))?;
+    let start = serde_json::from_value(
+        payload
+            .get("start")
+            .cloned()
+            .ok_or_else(|| "bars export requires payload.start".to_string())?,
+    )
+    .map_err(|error| format!("invalid export start: {error}"))?;
+    let end = serde_json::from_value(
+        payload
+            .get("end")
+            .cloned()
+            .ok_or_else(|| "bars export requires payload.end".to_string())?,
+    )
+    .map_err(|error| format!("invalid export end: {error}"))?;
 
     update_stage(
         jobs,
@@ -614,7 +872,9 @@ async fn export_bars_dataset(
         .await
         .map_err(|error| format!("failed to load bars for export: {error}"))?;
 
-    let export_dir = artifact_root.join("dataset_exports").join(job_id.to_string());
+    let export_dir = artifact_root
+        .join("dataset_exports")
+        .join(job_id.to_string());
     fs::create_dir_all(&export_dir)
         .await
         .map_err(|error| format!("failed to create export directory: {error}"))?;
@@ -629,7 +889,8 @@ async fn export_bars_dataset(
         json!({ "data_path": data_path, "row_count": bars.len() }),
     )
     .await?;
-    write_bars_parquet(&data_path, &bars).map_err(|error| format!("failed to write bars parquet: {error}"))?;
+    write_bars_parquet(&data_path, &bars)
+        .map_err(|error| format!("failed to write bars parquet: {error}"))?;
 
     let schema_version = "bars.v1";
     let manifest = json!({
@@ -773,13 +1034,18 @@ fn write_bars_parquet(path: &PathBuf, rows: &[BarRecord]) -> anyhow::Result<()> 
             .map(|row| row.symbol_contract.clone())
             .collect::<Vec<_>>(),
     );
-    let timeframes = StringArray::from(rows.iter().map(|row| row.timeframe.clone()).collect::<Vec<_>>());
+    let timeframes = StringArray::from(
+        rows.iter()
+            .map(|row| row.timeframe.clone())
+            .collect::<Vec<_>>(),
+    );
     let opens = Float64Array::from(rows.iter().map(|row| row.open).collect::<Vec<_>>());
     let highs = Float64Array::from(rows.iter().map(|row| row.high).collect::<Vec<_>>());
     let lows = Float64Array::from(rows.iter().map(|row| row.low).collect::<Vec<_>>());
     let closes = Float64Array::from(rows.iter().map(|row| row.close).collect::<Vec<_>>());
     let volumes = Float64Array::from(rows.iter().map(|row| row.volume).collect::<Vec<_>>());
-    let trade_counts = UInt64Array::from(rows.iter().map(|row| row.trade_count).collect::<Vec<_>>());
+    let trade_counts =
+        UInt64Array::from(rows.iter().map(|row| row.trade_count).collect::<Vec<_>>());
 
     let batch = RecordBatch::try_new(
         schema.clone(),

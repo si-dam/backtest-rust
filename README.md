@@ -64,6 +64,7 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - the worker loads persisted time bars from ClickHouse
   - ORB simulation runs in `crates/backtest`
   - runs and trades persist in Postgres
+  - split runs are supported with paired `[IS]` and `[OOS]` segments from one backtest job payload
   - the frontend can submit and inspect ORB runs
   - fixture-based parity cases for ORB now live under `crates/backtest/tests/`
 - the first dataset export path now exists:

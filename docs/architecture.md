@@ -42,6 +42,7 @@
 - The first strategy path now exists in Rust:
   - `POST /api/v1/backtests/jobs` can queue `orb_breakout_v1`
   - `runtime-worker` loads persisted time bars from ClickHouse and runs the ORB engine in `crates/backtest`
+  - a single ORB job can optionally split the requested window into `[IS]` and `[OOS]` runs with shared split metadata
   - run metadata and trades persist to Postgres and are exposed through `/api/v1/backtests/runs/*`
   - `crates/backtest/tests/fixtures/` contains reference-style ORB cases used to keep the Rust implementation aligned with the Python behavior
 - The first dataset export path now exists:

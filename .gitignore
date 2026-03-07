@@ -14,3 +14,4 @@
 /.pnpm-store/
 /artifacts/
 /data/
+__pycache__/
