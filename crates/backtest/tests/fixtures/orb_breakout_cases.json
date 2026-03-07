@@ -277,6 +277,252 @@
     }
   },
   {
+    "name": "reentry_disabled_single_stop",
+    "params": {
+      "symbol_contract": "NQH6",
+      "start": "2026-02-18T14:30:00Z",
+      "end": "2026-02-18T21:00:00Z",
+      "timeframe": "1m",
+      "ib_minutes": 1,
+      "session_start": "09:30:00",
+      "session_end": "16:00:00",
+      "stop_mode": "or_boundary",
+      "tp_r_multiple": 2.0,
+      "entry_mode": "first_outside",
+      "contracts": 1,
+      "timezone": "America/New_York"
+    },
+    "bars": [
+      {
+        "ts": "2026-02-18T14:31:00Z",
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.0,
+        "volume": 10.0
+      },
+      {
+        "ts": "2026-02-18T14:32:00Z",
+        "open": 100.0,
+        "high": 103.0,
+        "low": 101.0,
+        "close": 102.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:33:00Z",
+        "open": 102.0,
+        "high": 103.0,
+        "low": 98.0,
+        "close": 99.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:34:00Z",
+        "open": 98.0,
+        "high": 99.0,
+        "low": 97.0,
+        "close": 98.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:35:00Z",
+        "open": 98.0,
+        "high": 99.0,
+        "low": 95.0,
+        "close": 96.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:36:00Z",
+        "open": 95.0,
+        "high": 94.0,
+        "low": 91.0,
+        "close": 92.0,
+        "volume": 20.0
+      }
+    ],
+    "expected_trades": [
+      {
+        "session_date": "2026-02-18",
+        "timeframe": "1m",
+        "ib_minutes": 1,
+        "side": "long",
+        "entry_time": "2026-02-18T14:32:00Z",
+        "entry_price": 102.0,
+        "stop_price": 99.0,
+        "target_price": 108.0,
+        "exit_time": "2026-02-18T14:33:00Z",
+        "exit_price": 99.0,
+        "exit_reason": "stop",
+        "pnl": -3.0,
+        "r_multiple": -1.0
+      }
+    ],
+    "expected_summary": {
+      "trades": 1,
+      "wins": 0,
+      "losses": 1,
+      "full_tp_wins": 0,
+      "full_losses": 1,
+      "win_rate": 0.0,
+      "net_pnl": -3.0,
+      "total_pnl": -3.0,
+      "avg_pnl": -3.0,
+      "total_r": -1.0,
+      "avg_r": -1.0,
+      "max_drawdown": 3.0
+    }
+  },
+  {
+    "name": "short_breakout_target",
+    "params": {
+      "symbol_contract": "NQH6",
+      "start": "2026-02-18T14:30:00Z",
+      "end": "2026-02-18T21:00:00Z",
+      "timeframe": "1m",
+      "ib_minutes": 1,
+      "session_start": "09:30:00",
+      "session_end": "16:00:00",
+      "stop_mode": "or_boundary",
+      "tp_r_multiple": 2.0,
+      "entry_mode": "first_outside",
+      "contracts": 1,
+      "timezone": "America/New_York"
+    },
+    "bars": [
+      {
+        "ts": "2026-02-18T14:31:00Z",
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.0,
+        "volume": 10.0
+      },
+      {
+        "ts": "2026-02-18T14:32:00Z",
+        "open": 100.0,
+        "high": 100.0,
+        "low": 97.0,
+        "close": 98.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:33:00Z",
+        "open": 98.0,
+        "high": 99.0,
+        "low": 91.0,
+        "close": 92.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:34:00Z",
+        "open": 92.0,
+        "high": 93.0,
+        "low": 91.0,
+        "close": 92.0,
+        "volume": 20.0
+      }
+    ],
+    "expected_trades": [
+      {
+        "session_date": "2026-02-18",
+        "timeframe": "1m",
+        "ib_minutes": 1,
+        "side": "short",
+        "entry_time": "2026-02-18T14:32:00Z",
+        "entry_price": 98.0,
+        "stop_price": 101.0,
+        "target_price": 92.0,
+        "exit_time": "2026-02-18T14:33:00Z",
+        "exit_price": 92.0,
+        "exit_reason": "target",
+        "pnl": 6.0,
+        "r_multiple": 2.0
+      }
+    ],
+    "expected_summary": {
+      "trades": 1,
+      "wins": 1,
+      "losses": 0,
+      "full_tp_wins": 1,
+      "full_losses": 0,
+      "win_rate": 1.0,
+      "net_pnl": 6.0,
+      "total_pnl": 6.0,
+      "avg_pnl": 6.0,
+      "total_r": 2.0,
+      "avg_r": 2.0,
+      "max_drawdown": 0.0
+    }
+  },
+  {
+    "name": "no_breakout_no_trade",
+    "params": {
+      "symbol_contract": "NQH6",
+      "start": "2026-02-18T14:30:00Z",
+      "end": "2026-02-18T21:00:00Z",
+      "timeframe": "1m",
+      "ib_minutes": 1,
+      "session_start": "09:30:00",
+      "session_end": "16:00:00",
+      "stop_mode": "or_boundary",
+      "tp_r_multiple": 2.0,
+      "entry_mode": "first_outside",
+      "contracts": 1,
+      "timezone": "America/New_York"
+    },
+    "bars": [
+      {
+        "ts": "2026-02-18T14:31:00Z",
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.0,
+        "volume": 10.0
+      },
+      {
+        "ts": "2026-02-18T14:32:00Z",
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:33:00Z",
+        "open": 100.0,
+        "high": 100.5,
+        "low": 99.5,
+        "close": 100.0,
+        "volume": 20.0
+      },
+      {
+        "ts": "2026-02-18T14:34:00Z",
+        "open": 100.0,
+        "high": 100.75,
+        "low": 99.25,
+        "close": 100.0,
+        "volume": 20.0
+      }
+    ],
+    "expected_trades": [],
+    "expected_summary": {
+      "trades": 0,
+      "wins": 0,
+      "losses": 0,
+      "full_tp_wins": 0,
+      "full_losses": 0,
+      "win_rate": 0.0,
+      "net_pnl": 0.0,
+      "total_pnl": 0.0,
+      "avg_pnl": 0.0,
+      "total_r": 0.0,
+      "avg_r": 0.0,
+      "max_drawdown": 0.0
+    }
+  },
+  {
     "name": "contracts_scale_pnl",
     "params": {
       "symbol_contract": "NQH6",
