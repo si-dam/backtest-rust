@@ -70,8 +70,26 @@ async fn handle_ingestion(
         .and_then(Value::as_str)
         .ok_or_else(|| "missing file_path".to_string())?;
     let symbol_contract = payload.get("symbol_contract").and_then(Value::as_str);
+    let rebuild = payload.get("rebuild").and_then(Value::as_bool).unwrap_or(false);
     let bytes = fs::read(file_path).await.map_err(|error| format!("failed to read file: {error}"))?;
     let file_hash = sha256_hex(&bytes);
+    if let Some(existing) = jobs
+        .get_ingested_file(file_path)
+        .await
+        .map_err(|error| format!("failed to load prior ingest metadata: {error}"))?
+    {
+        if !rebuild && existing.source_hash == file_hash {
+            return Ok(json!({
+                "status": "skipped",
+                "reason": "matching_source_already_ingested",
+                "source_path": existing.source_path,
+                "hash": file_hash,
+            }));
+        }
+        if !rebuild && existing.source_hash != file_hash {
+            return Err("source path already exists with a different hash; resubmit with rebuild=true".to_string());
+        }
+    }
     let parsed = parse_market_data_file(std::path::Path::new(file_path), settings.dataset_timezone, symbol_contract)
         .map_err(|error| format!("failed to parse market data file: {error}"))?;
     let summary = summarize_parsed_data(std::path::Path::new(file_path), &parsed);
@@ -83,17 +101,19 @@ async fn handle_ingestion(
 
     match parsed {
         ParsedMarketData::Ticks(ticks) => {
-            let source_name = std::path::Path::new(file_path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("market-data.csv")
-                .to_string();
+            let source_name = file_path.to_string();
             let canonical_rows = ticks
                 .iter()
                 .cloned()
                 .map(|tick| tick.with_dataset_timezone(settings.dataset_timezone).with_source_file(source_name.clone()))
                 .map(CanonicalTickRow::from)
                 .collect::<Vec<_>>();
+            if rebuild {
+                market
+                    .delete_ticks_by_source(&source_name)
+                    .await
+                    .map_err(|error| format!("failed to clear prior ticks for source: {error}"))?;
+            }
             market
                 .insert_ticks(&canonical_rows)
                 .await
@@ -120,6 +140,7 @@ async fn handle_ingestion(
                     "start": first.ts,
                     "end": last.ts,
                     "tick_size": tick_size,
+                    "rebuild": true,
                 }),
                 max_attempts: 3,
             })
@@ -133,6 +154,7 @@ async fn handle_ingestion(
                     "end": last.ts,
                     "tick_size": tick_size,
                     "profile_timezone": settings.dataset_timezone.name(),
+                    "rebuild": true,
                 }),
                 max_attempts: 3,
             })
@@ -140,10 +162,17 @@ async fn handle_ingestion(
             .map_err(|error| format!("failed to enqueue build_profiles job: {error}"))?;
         }
         ParsedMarketData::Ohlc1m(bars) => {
-            market
-                .insert_time_bars(&bars)
-                .await
-                .map_err(|error| format!("failed to insert 1m bars: {error}"))?;
+            if let (Some(first), Some(last), Some(symbol)) = (bars.first(), bars.last(), summary.symbol_contract.as_deref()) {
+                market
+                    .replace_time_bars(symbol, "1m", first.ts, last.ts, &bars)
+                    .await
+                    .map_err(|error| format!("failed to replace 1m bars: {error}"))?;
+            } else {
+                market
+                    .insert_time_bars(&bars)
+                    .await
+                    .map_err(|error| format!("failed to insert 1m bars: {error}"))?;
+            }
             if let Some(symbol) = summary.symbol_contract.as_deref() {
                 jobs.upsert_symbol(symbol, &derive_symbol_root(symbol), None, Some(tick_size))
                     .await
@@ -188,9 +217,9 @@ async fn handle_build_bars(
         let bars = build_time_bars_from_ticks(&ticks, symbol_contract, timeframe, settings.dataset_timezone)
             .map_err(|error| format!("failed to build {timeframe} bars: {error}"))?;
         market
-            .insert_time_bars(&bars)
+            .replace_time_bars(symbol_contract, timeframe, start, end, &bars)
             .await
-            .map_err(|error| format!("failed to insert {timeframe} bars: {error}"))?;
+            .map_err(|error| format!("failed to replace {timeframe} bars: {error}"))?;
         inserted_timeframes.push(json!({ "timeframe": timeframe, "rows": bars.len() }));
     }
 
@@ -199,9 +228,9 @@ async fn handle_build_bars(
         let bars = build_non_time_bars_from_ticks(&ticks, symbol_contract, bar_type, bar_size, tick_size, settings.dataset_timezone)
             .map_err(|error| format!("failed to build {bar_type}:{bar_size} bars: {error}"))?;
         market
-            .insert_non_time_bars(&bars)
+            .replace_non_time_bars(symbol_contract, bar_type, bar_size, start, end, &bars)
             .await
-            .map_err(|error| format!("failed to insert {bar_type}:{bar_size} bars: {error}"))?;
+            .map_err(|error| format!("failed to replace {bar_type}:{bar_size} bars: {error}"))?;
         inserted_non_time.push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
     }
 
@@ -240,7 +269,7 @@ async fn handle_build_profiles(
     let ticks = tick_rows_to_canonical(&tick_rows);
     let profiles = build_profiles_for_ticks(symbol_contract, &ticks, profile_timezone, tick_size);
     market
-        .replace_profiles_for_symbol(symbol_contract, profile_timezone.name(), &profiles)
+        .replace_profiles_in_range(symbol_contract, profile_timezone.name(), start, end, &profiles)
         .await
         .map_err(|error| format!("failed to persist profiles: {error}"))?;
 

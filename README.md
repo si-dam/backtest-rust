@@ -43,8 +43,12 @@ This repo does not assume a local Docker stack. Postgres and ClickHouse can be a
 This repo now contains the phase-1 foundation and an in-progress phase-2 market-data slice:
 
 - ingest jobs parse Sierra-style tick and 1m OHLC CSV inputs
-- the worker persists canonical ticks and bars, then enqueues derived bar/profile jobs
-- the market crate can build time bars, non-time bars, and persisted base profile levels
+- the worker now handles duplicate source files intentionally:
+  - identical re-submits are skipped
+  - changed files require `rebuild=true`
+  - rebuilds replace derived bars/profiles in-range instead of appending
+- the market crate can build time bars, non-time bars, and persisted base profile levels for both volume and delta profiles
 - the frontend can read the new `/api/v1` market endpoints
+- fixture-based golden tests now lock down bar/profile kernel behavior in `crates/market/tests/`
 
 The remaining work is to harden the persistence/query behavior, add dataset export and backtest execution, and validate parity against the imported Python reference app.

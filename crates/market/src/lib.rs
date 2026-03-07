@@ -316,6 +316,16 @@ impl ClickHouseMarketStore {
         Ok(())
     }
 
+    pub async fn delete_ticks_by_source(&self, source_file: &str) -> anyhow::Result<()> {
+        self.client
+            .query("ALTER TABLE ticks DELETE WHERE source_file = ?")
+            .bind(source_file)
+            .execute()
+            .await
+            .context("failed to delete ticks by source file")?;
+        Ok(())
+    }
+
     pub async fn insert_time_bars(&self, rows: &[TimeBarRow]) -> anyhow::Result<()> {
         if rows.is_empty() {
             return Ok(());
@@ -326,6 +336,39 @@ impl ClickHouseMarketStore {
         }
         insert.end().await.context("failed to finalize time bar insert")?;
         Ok(())
+    }
+
+    pub async fn clear_time_bars(
+        &self,
+        symbol_contract: &str,
+        timeframe: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.client
+            .query(
+                "ALTER TABLE bars_time DELETE WHERE symbol_contract = ? AND timeframe = ? AND ts >= ? AND ts <= ?",
+            )
+            .bind(symbol_contract)
+            .bind(timeframe)
+            .bind(start)
+            .bind(end)
+            .execute()
+            .await
+            .context("failed to clear time bars")?;
+        Ok(())
+    }
+
+    pub async fn replace_time_bars(
+        &self,
+        symbol_contract: &str,
+        timeframe: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        rows: &[TimeBarRow],
+    ) -> anyhow::Result<()> {
+        self.clear_time_bars(symbol_contract, timeframe, start, end).await?;
+        self.insert_time_bars(rows).await
     }
 
     pub async fn insert_non_time_bars(&self, rows: &[NonTimeBarRow]) -> anyhow::Result<()> {
@@ -343,34 +386,112 @@ impl ClickHouseMarketStore {
         Ok(())
     }
 
-    pub async fn replace_profiles_for_symbol(
+    pub async fn clear_non_time_bars(
+        &self,
+        symbol_contract: &str,
+        bar_type: &str,
+        bar_size: u32,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.client
+            .query(
+                "ALTER TABLE bars_non_time DELETE WHERE symbol_contract = ? AND bar_type = ? AND bar_size = ? AND ts >= ? AND ts <= ?",
+            )
+            .bind(symbol_contract)
+            .bind(bar_type)
+            .bind(bar_size)
+            .bind(start)
+            .bind(end)
+            .execute()
+            .await
+            .context("failed to clear non-time bars")?;
+        Ok(())
+    }
+
+    pub async fn replace_non_time_bars(
+        &self,
+        symbol_contract: &str,
+        bar_type: &str,
+        bar_size: u32,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        rows: &[NonTimeBarRow],
+    ) -> anyhow::Result<()> {
+        self.clear_non_time_bars(symbol_contract, bar_type, bar_size, start, end)
+            .await?;
+        self.insert_non_time_bars(rows).await
+    }
+
+    pub async fn clear_profiles_in_range(
         &self,
         symbol_contract: &str,
         profile_timezone: &str,
-        profiles: &[PersistedProfile],
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
     ) -> anyhow::Result<()> {
-        if profiles.is_empty() {
-            return Ok(());
+        let segment_ids = self
+            .client
+            .query(
+                r#"
+                SELECT segment_id
+                FROM profile_segments
+                WHERE symbol_contract = ?
+                  AND profile_timezone = ?
+                  AND segment_end >= ?
+                  AND segment_start <= ?
+                "#,
+            )
+            .bind(symbol_contract)
+            .bind(profile_timezone)
+            .bind(start)
+            .bind(end)
+            .fetch_all::<SegmentIdRow>()
+            .await
+            .context("failed to load overlapping profile segments")?;
+
+        if !segment_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("?", segment_ids.len()).collect::<Vec<_>>().join(", ");
+            let sql = format!("ALTER TABLE profile_levels_base DELETE WHERE segment_id IN ({placeholders})");
+            let mut query = self.client.query(&sql);
+            for segment_id in &segment_ids {
+                query = query.bind(segment_id.segment_id);
+            }
+            query
+                .execute()
+                .await
+                .context("failed to clear profile levels")?;
         }
 
         self.client
             .query(
-                "ALTER TABLE profile_levels_base DELETE WHERE symbol_contract = ? AND segment_id IN (SELECT segment_id FROM profile_segments WHERE symbol_contract = ? AND profile_timezone = ?)",
+                "ALTER TABLE profile_segments DELETE WHERE symbol_contract = ? AND profile_timezone = ? AND segment_end >= ? AND segment_start <= ?",
             )
             .bind(symbol_contract)
-            .bind(symbol_contract)
             .bind(profile_timezone)
-            .execute()
-            .await
-            .context("failed to clear profile levels")?;
-
-        self.client
-            .query("ALTER TABLE profile_segments DELETE WHERE symbol_contract = ? AND profile_timezone = ?")
-            .bind(symbol_contract)
-            .bind(profile_timezone)
+            .bind(start)
+            .bind(end)
             .execute()
             .await
             .context("failed to clear profile segments")?;
+
+        Ok(())
+    }
+
+    pub async fn replace_profiles_in_range(
+        &self,
+        symbol_contract: &str,
+        profile_timezone: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        profiles: &[PersistedProfile],
+    ) -> anyhow::Result<()> {
+        self.clear_profiles_in_range(symbol_contract, profile_timezone, start, end)
+            .await?;
+
+        if profiles.is_empty() {
+            return Ok(());
+        }
 
         let mut segment_insert = self.client.insert("profile_segments").context("failed to create profile segment insert")?;
         let mut level_insert = self.client.insert("profile_levels_base").context("failed to create profile level insert")?;
@@ -449,8 +570,17 @@ impl BarsQuery {
         if self.end < self.start {
             return Err(ApiError::bad_request("end must be after start"));
         }
-        if self.bar_type != "time" && self.bar_size.is_none() {
-            return Err(ApiError::bad_request("bar_size is required for non-time bars"));
+        match self.bar_type.as_str() {
+            "time" => {
+                timeframe_to_seconds(&self.timeframe)
+                    .map_err(|error| ApiError::bad_request(format!("unsupported timeframe: {error}")))?;
+            }
+            "tick" | "volume" | "range" => {
+                if self.bar_size.unwrap_or(0) == 0 {
+                    return Err(ApiError::bad_request("bar_size is required for non-time bars"));
+                }
+            }
+            _ => return Err(ApiError::bad_request("bar_type must be one of time, tick, volume, range")),
         }
         Ok(())
     }
@@ -467,6 +597,15 @@ impl PresetProfileQuery {
         if !matches!(self.metric.as_str(), "volume" | "delta") {
             return Err(ApiError::bad_request("metric must be volume or delta"));
         }
+        self.timezone
+            .parse::<Tz>()
+            .map_err(|_| ApiError::bad_request("timezone must be a valid IANA timezone"))?;
+        if self.tick_aggregation == 0 {
+            return Err(ApiError::bad_request("tick_aggregation must be greater than 0"));
+        }
+        if self.max_segments == 0 {
+            return Err(ApiError::bad_request("max_segments must be greater than 0"));
+        }
         Ok(())
     }
 }
@@ -478,6 +617,15 @@ impl AreaProfileQuery {
         }
         if self.price_max < self.price_min {
             return Err(ApiError::bad_request("price_max must be >= price_min"));
+        }
+        if !matches!(self.metric.as_str(), "volume" | "delta") {
+            return Err(ApiError::bad_request("metric must be volume or delta"));
+        }
+        self.timezone
+            .parse::<Tz>()
+            .map_err(|_| ApiError::bad_request("timezone must be a valid IANA timezone"))?;
+        if self.tick_aggregation == 0 {
+            return Err(ApiError::bad_request("tick_aggregation must be greater than 0"));
         }
         Ok(())
     }
@@ -734,6 +882,11 @@ pub struct ProfileLevelBaseRow {
     pub delta: f64,
 }
 
+#[derive(Clone, Debug, Deserialize, Row)]
+struct SegmentIdRow {
+    segment_id: Uuid,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct PresetProfilesResponse {
     pub symbol_contract: String,
@@ -894,16 +1047,18 @@ pub fn build_profiles_for_ticks(
 ) -> Vec<PersistedProfile> {
     let mut profiles = Vec::new();
     for preset in ["day", "week", "rth", "eth"] {
-        profiles.extend(build_preset_profiles(
-            symbol_contract,
-            ticks,
-            preset,
-            "volume",
-            profile_timezone,
-            tick_size,
-            true,
-            70.0,
-        ));
+        for metric in ["volume", "delta"] {
+            profiles.extend(build_preset_profiles(
+                symbol_contract,
+                ticks,
+                preset,
+                metric,
+                profile_timezone,
+                tick_size,
+                metric == "volume",
+                70.0,
+            ));
+        }
     }
     profiles
 }

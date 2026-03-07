@@ -66,6 +66,17 @@ pub struct JobRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+pub struct IngestedFileRecord {
+    pub id: Uuid,
+    pub source_path: String,
+    pub source_hash: String,
+    pub schema_kind: String,
+    pub symbol_contract: Option<String>,
+    pub row_count: i64,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateJobInput {
     pub job_type: JobType,
@@ -148,6 +159,29 @@ impl PgJobStore {
         .fetch_optional(&self.pool)
         .await
         .context("failed to load job")?;
+
+        Ok(record)
+    }
+
+    pub async fn get_ingested_file(&self, source_path: &str) -> anyhow::Result<Option<IngestedFileRecord>> {
+        let record = sqlx::query_as::<_, IngestedFileRecord>(
+            r#"
+            SELECT
+                id,
+                source_path,
+                source_hash,
+                schema_kind,
+                symbol_contract,
+                row_count,
+                created_at
+            FROM ingested_files
+            WHERE source_path = $1
+            "#,
+        )
+        .bind(source_path)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to load ingested file")?;
 
         Ok(record)
     }

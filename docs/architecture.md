@@ -29,7 +29,12 @@
   - time bars into `bars_time`
   - non-time bars into `bars_non_time`
   - persisted preset profile segments and base levels into `profile_segments` and `profile_levels_base`
+- Rebuild semantics are now explicit:
+  - the same source path and hash is treated as a no-op unless `rebuild=true`
+  - rebuilds clear and replace affected bars/profiles in-range instead of appending duplicates
+  - preset profile persistence now covers both `volume` and `delta`
 - The frontend currently exercises three workflows:
   - submit an ingest job and poll `/api/v1/jobs/:job_id`
   - read persisted bars for charting
   - read persisted preset profiles with client-side filter controls
+- `crates/market/tests/fixtures/` contains the first golden dataset used to lock down bar/profile derivation behavior during the rewrite.

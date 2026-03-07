@@ -1,0 +1,179 @@
+{
+  "time_bars_1m": [
+    {
+      "ts": "2026-03-02T21:05:00Z",
+      "trading_day": "2026-03-02",
+      "session_date": "2026-03-02",
+      "symbol_contract": "NQH6",
+      "timeframe": "1m",
+      "open": 100.0,
+      "high": 100.0,
+      "low": 100.0,
+      "close": 100.0,
+      "volume": 2.0,
+      "trade_count": 1
+    },
+    {
+      "ts": "2026-03-02T21:06:00Z",
+      "trading_day": "2026-03-02",
+      "session_date": "2026-03-02",
+      "symbol_contract": "NQH6",
+      "timeframe": "1m",
+      "open": 99.75,
+      "high": 99.75,
+      "low": 99.75,
+      "close": 99.75,
+      "volume": 1.0,
+      "trade_count": 1
+    },
+    {
+      "ts": "2026-03-03T14:31:00Z",
+      "trading_day": "2026-03-03",
+      "session_date": "2026-03-03",
+      "symbol_contract": "NQH6",
+      "timeframe": "1m",
+      "open": 100.25,
+      "high": 100.25,
+      "low": 100.25,
+      "close": 100.25,
+      "volume": 3.0,
+      "trade_count": 1
+    },
+    {
+      "ts": "2026-03-03T14:32:00Z",
+      "trading_day": "2026-03-03",
+      "session_date": "2026-03-03",
+      "symbol_contract": "NQH6",
+      "timeframe": "1m",
+      "open": 100.0,
+      "high": 100.0,
+      "low": 100.0,
+      "close": 100.0,
+      "volume": 1.0,
+      "trade_count": 1
+    },
+    {
+      "ts": "2026-03-03T19:00:00Z",
+      "trading_day": "2026-03-03",
+      "session_date": "2026-03-03",
+      "symbol_contract": "NQH6",
+      "timeframe": "1m",
+      "open": 100.5,
+      "high": 100.5,
+      "low": 100.5,
+      "close": 100.5,
+      "volume": 4.0,
+      "trade_count": 1
+    }
+  ],
+  "tick_bars_3": [
+    {
+      "ts": "2026-03-03T14:31:00Z",
+      "trading_day": "2026-03-03",
+      "session_date": "2026-03-03",
+      "symbol_contract": "NQH6",
+      "bar_type": "tick",
+      "bar_size": 3,
+      "open": 100.0,
+      "high": 100.25,
+      "low": 99.75,
+      "close": 100.25,
+      "volume": 6.0,
+      "trade_count": 3
+    },
+    {
+      "ts": "2026-03-03T19:00:00Z",
+      "trading_day": "2026-03-03",
+      "session_date": "2026-03-03",
+      "symbol_contract": "NQH6",
+      "bar_type": "tick",
+      "bar_size": 3,
+      "open": 100.0,
+      "high": 100.5,
+      "low": 100.0,
+      "close": 100.5,
+      "volume": 5.0,
+      "trade_count": 2
+    }
+  ],
+  "profile_count": 8,
+  "profiles": [
+    {
+      "preset": "day",
+      "metric": "volume",
+      "label": "Day 2026-03-02",
+      "start": "2026-03-02T21:00:00Z",
+      "end": "2026-03-03T21:00:00Z",
+      "total_value": 11.0,
+      "max_value": 4.0,
+      "value_area_enabled": true,
+      "value_area_poc": 100.5,
+      "value_area_low": 100.0,
+      "value_area_high": 100.5,
+      "value_area_volume": 10.0,
+      "levels": [
+        { "price_level": 99.75, "value": 1.0 },
+        { "price_level": 100.0, "value": 3.0 },
+        { "price_level": 100.25, "value": 3.0 },
+        { "price_level": 100.5, "value": 4.0 }
+      ]
+    },
+    {
+      "preset": "day",
+      "metric": "delta",
+      "label": "Day 2026-03-02",
+      "start": "2026-03-02T21:00:00Z",
+      "end": "2026-03-03T21:00:00Z",
+      "total_value": 7.0,
+      "max_value": 4.0,
+      "value_area_enabled": false,
+      "value_area_poc": null,
+      "value_area_low": null,
+      "value_area_high": null,
+      "value_area_volume": 0.0,
+      "levels": [
+        { "price_level": 99.75, "value": -1.0 },
+        { "price_level": 100.0, "value": 1.0 },
+        { "price_level": 100.25, "value": 3.0 },
+        { "price_level": 100.5, "value": 4.0 }
+      ]
+    },
+    {
+      "preset": "rth",
+      "metric": "volume",
+      "label": "RTH 2026-03-03",
+      "start": "2026-03-03T14:31:00Z",
+      "end": "2026-03-03T19:00:00Z",
+      "total_value": 8.0,
+      "max_value": 4.0,
+      "value_area_enabled": true,
+      "value_area_poc": 100.5,
+      "value_area_low": 100.25,
+      "value_area_high": 100.5,
+      "value_area_volume": 7.0,
+      "levels": [
+        { "price_level": 100.0, "value": 1.0 },
+        { "price_level": 100.25, "value": 3.0 },
+        { "price_level": 100.5, "value": 4.0 }
+      ]
+    },
+    {
+      "preset": "eth",
+      "metric": "volume",
+      "label": "ETH 2026-03-02",
+      "start": "2026-03-02T21:05:00Z",
+      "end": "2026-03-02T21:06:00Z",
+      "total_value": 3.0,
+      "max_value": 2.0,
+      "value_area_enabled": true,
+      "value_area_poc": 100.0,
+      "value_area_low": 99.75,
+      "value_area_high": 100.0,
+      "value_area_volume": 3.0,
+      "levels": [
+        { "price_level": 99.75, "value": 1.0 },
+        { "price_level": 100.0, "value": 2.0 }
+      ]
+    }
+  ]
+}
