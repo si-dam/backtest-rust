@@ -46,8 +46,8 @@
   - run metadata and trades persist to Postgres and are exposed through `/api/v1/backtests/runs/*`
   - `crates/backtest/tests/fixtures/` contains reference-style ORB cases used to keep the Rust implementation aligned with the Python behavior
 - The first dataset export path now exists:
-  - `POST /api/v1/datasets/jobs` supports `export_kind = "bars"`
-  - the worker reads persisted bars from ClickHouse, writes Parquet plus a manifest under `artifacts/`, and records the export in Postgres
+  - `POST /api/v1/datasets/jobs` supports `export_kind = "bars"` and `export_kind = "ticks"`
+  - the worker reads persisted bars or ticks from ClickHouse, writes Parquet plus a manifest under `artifacts/`, and records the export in Postgres
   - `python/examples/read_bars_export.py` is the first offline consumer example for the Python side
 - The frontend currently exercises three workflows:
   - submit an ingest job and poll `/api/v1/jobs/:job_id`

@@ -799,6 +799,17 @@ async fn handle_dataset_export(
             )
             .await
         }
+        "ticks" => {
+            export_ticks_dataset(
+                jobs,
+                market,
+                job_id,
+                worker_id,
+                &artifact_root,
+                export_payload,
+            )
+            .await
+        }
         other => Err(format!("unsupported export_kind: {other}")),
     }
 }
@@ -951,6 +962,127 @@ async fn export_bars_dataset(
     }))
 }
 
+async fn export_ticks_dataset(
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
+    artifact_root: &PathBuf,
+    payload: Value,
+) -> std::result::Result<Value, String> {
+    let symbol_contract = payload
+        .get("symbol_contract")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ticks export requires payload.symbol_contract".to_string())?;
+    let start = serde_json::from_value(
+        payload
+            .get("start")
+            .cloned()
+            .ok_or_else(|| "ticks export requires payload.start".to_string())?,
+    )
+    .map_err(|error| format!("invalid export start: {error}"))?;
+    let end = serde_json::from_value(
+        payload
+            .get("end")
+            .cloned()
+            .ok_or_else(|| "ticks export requires payload.end".to_string())?,
+    )
+    .map_err(|error| format!("invalid export end: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "loading_export_data",
+        json!({
+            "export_kind": "ticks",
+            "symbol_contract": symbol_contract,
+            "start": start,
+            "end": end,
+        }),
+    )
+    .await?;
+    let ticks = market
+        .load_ticks(symbol_contract, &TicksQuery { start, end })
+        .await
+        .map_err(|error| format!("failed to load ticks for export: {error}"))?;
+
+    let export_dir = artifact_root
+        .join("dataset_exports")
+        .join(job_id.to_string());
+    fs::create_dir_all(&export_dir)
+        .await
+        .map_err(|error| format!("failed to create export directory: {error}"))?;
+    let data_path = export_dir.join("ticks.parquet");
+    let manifest_path = export_dir.join("manifest.json");
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "writing_export_files",
+        json!({ "data_path": data_path, "row_count": ticks.len() }),
+    )
+    .await?;
+    write_ticks_parquet(&data_path, &ticks)
+        .map_err(|error| format!("failed to write ticks parquet: {error}"))?;
+
+    let schema_version = "ticks.v1";
+    let manifest = json!({
+        "job_id": job_id,
+        "export_kind": "ticks",
+        "schema_version": schema_version,
+        "files": [
+            {
+                "kind": "parquet",
+                "path": data_path,
+                "rows": ticks.len(),
+            }
+        ],
+        "request": {
+            "symbol_contract": symbol_contract,
+            "start": start,
+            "end": end,
+        },
+        "row_count": ticks.len(),
+    });
+
+    let manifest_string = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed to encode manifest: {error}"))?;
+    fs::write(&manifest_path, manifest_string)
+        .await
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "recording_export",
+        json!({ "manifest_path": manifest_path }),
+    )
+    .await?;
+    let export_record = jobs
+        .record_dataset_export(
+            Some(job_id),
+            "ticks",
+            manifest_path
+                .to_str()
+                .ok_or_else(|| "manifest path is not valid UTF-8".to_string())?,
+            schema_version,
+            manifest.clone(),
+        )
+        .await
+        .map_err(|error| format!("failed to record dataset export: {error}"))?;
+
+    Ok(json!({
+        "status": "dataset_exported",
+        "export_id": export_record.id,
+        "export_kind": "ticks",
+        "manifest_path": manifest_path,
+        "row_count": ticks.len(),
+    }))
+}
+
 async fn update_stage(
     jobs: &PgJobStore,
     job_id: Uuid,
@@ -1060,6 +1192,62 @@ fn write_bars_parquet(path: &PathBuf, rows: &[BarRecord]) -> anyhow::Result<()> 
             Arc::new(closes),
             Arc::new(volumes),
             Arc::new(trade_counts),
+        ],
+    )?;
+
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+fn write_ticks_parquet(path: &PathBuf, rows: &[market::TickRecord]) -> anyhow::Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::<str>::from("UTC"))),
+            false,
+        ),
+        Field::new("session_date", DataType::Utf8, false),
+        Field::new("symbol_contract", DataType::Utf8, false),
+        Field::new("trade_price", DataType::Float64, false),
+        Field::new("trade_size", DataType::Float64, false),
+        Field::new("bid_price", DataType::Float64, true),
+        Field::new("ask_price", DataType::Float64, true),
+    ]));
+
+    let ts = TimestampMicrosecondArray::from(
+        rows.iter()
+            .map(|row| row.ts.timestamp_micros())
+            .collect::<Vec<_>>(),
+    );
+    let session_dates = StringArray::from(
+        rows.iter()
+            .map(|row| row.session_date.to_string())
+            .collect::<Vec<_>>(),
+    );
+    let symbol_contracts = StringArray::from(
+        rows.iter()
+            .map(|row| row.symbol_contract.clone())
+            .collect::<Vec<_>>(),
+    );
+    let trade_prices =
+        Float64Array::from(rows.iter().map(|row| row.trade_price).collect::<Vec<_>>());
+    let trade_sizes = Float64Array::from(rows.iter().map(|row| row.trade_size).collect::<Vec<_>>());
+    let bid_prices = Float64Array::from(rows.iter().map(|row| row.bid_price).collect::<Vec<_>>());
+    let ask_prices = Float64Array::from(rows.iter().map(|row| row.ask_price).collect::<Vec<_>>());
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ts) as ArrayRef,
+            Arc::new(session_dates),
+            Arc::new(symbol_contracts),
+            Arc::new(trade_prices),
+            Arc::new(trade_sizes),
+            Arc::new(bid_prices),
+            Arc::new(ask_prices),
         ],
     )?;
 

@@ -15,7 +15,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     manifest = json.loads(args.manifest.read_text())
-    if manifest.get("export_kind") != "bars":
+    export_kind = manifest.get("export_kind")
+    if export_kind not in {"bars", "ticks"}:
         raise SystemExit(f"Unsupported export kind: {manifest.get('export_kind')}")
 
     try:
@@ -29,7 +30,17 @@ def main() -> None:
 
     parquet_path = Path(files[0]["path"])
     table = pq.read_table(parquet_path)
-    print(json.dumps({"manifest": str(args.manifest), "rows": table.num_rows, "columns": table.column_names}, indent=2))
+    print(
+        json.dumps(
+            {
+                "manifest": str(args.manifest),
+                "export_kind": export_kind,
+                "rows": table.num_rows,
+                "columns": table.column_names,
+            },
+            indent=2,
+        )
+    )
 
     preview = table.slice(0, max(args.rows, 0)).to_pylist()
     print(json.dumps(preview, indent=2, default=str))

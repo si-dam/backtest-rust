@@ -68,8 +68,8 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - the frontend can submit and inspect ORB runs
   - fixture-based parity cases for ORB now live under `crates/backtest/tests/`
 - the first dataset export path now exists:
-  - `POST /api/v1/datasets/jobs` accepts `export_kind: "bars"` with symbol/timeframe/date-range payload
-  - the worker writes `bars.parquet` plus `manifest.json` under `ARTIFACT_ROOT/dataset_exports/<job_id>/`
+  - `POST /api/v1/datasets/jobs` accepts `export_kind: "bars"` or `export_kind: "ticks"`
+  - the worker writes `bars.parquet` or `ticks.parquet` plus `manifest.json` under `ARTIFACT_ROOT/dataset_exports/<job_id>/`
   - export metadata is recorded in `dataset_exports`
   - a minimal Python reader lives at `python/examples/read_bars_export.py`
 - fixture-based golden tests now lock down time, tick, volume, and range bars plus multi-preset profile behavior in `crates/market/tests/`
