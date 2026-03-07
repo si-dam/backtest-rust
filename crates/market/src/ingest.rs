@@ -26,7 +26,11 @@ pub struct ParsedFileSummary {
     pub row_count: usize,
 }
 
-pub fn parse_market_data_file(path: &Path, dataset_timezone: Tz, fallback_symbol: Option<&str>) -> anyhow::Result<ParsedMarketData> {
+pub fn parse_market_data_file(
+    path: &Path,
+    dataset_timezone: Tz,
+    fallback_symbol: Option<&str>,
+) -> anyhow::Result<ParsedMarketData> {
     let bytes = fs::read(path).with_context(|| format!("unable to open {}", path.display()))?;
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)
@@ -40,18 +44,26 @@ pub fn parse_market_data_file(path: &Path, dataset_timezone: Tz, fallback_symbol
     if TickColumns::can_parse(&lookup) {
         let columns = TickColumns::from_lookup(&lookup)?;
         let mut ticks = Vec::new();
-        for row in reader.records() {
-            let record = row?;
-            ticks.push(parse_tick_record(&record, &columns, dataset_timezone, fallback_symbol)?);
+        for (row_index, row) in reader.records().enumerate() {
+            let line_number = row_index + 2;
+            let record = row.with_context(|| format!("failed to read row {line_number}"))?;
+            ticks.push(
+                parse_tick_record(&record, &columns, dataset_timezone, fallback_symbol)
+                    .with_context(|| format!("failed to parse tick row {line_number}"))?,
+            );
         }
         return Ok(ParsedMarketData::Ticks(ticks));
     }
 
     let columns = OhlcColumns::from_lookup(&lookup)?;
     let mut bars = Vec::new();
-    for row in reader.records() {
-        let record = row?;
-        bars.push(parse_ohlc_record(&record, &columns, dataset_timezone, fallback_symbol)?);
+    for (row_index, row) in reader.records().enumerate() {
+        let line_number = row_index + 2;
+        let record = row.with_context(|| format!("failed to read row {line_number}"))?;
+        bars.push(
+            parse_ohlc_record(&record, &columns, dataset_timezone, fallback_symbol)
+                .with_context(|| format!("failed to parse OHLC row {line_number}"))?,
+        );
     }
     Ok(ParsedMarketData::Ohlc1m(bars))
 }
@@ -88,7 +100,9 @@ impl HeaderLookup {
     }
 
     fn find(&self, aliases: &[&str]) -> Option<usize> {
-        aliases.iter().find_map(|alias| self.index_by_name.get(&normalize_header(alias)).copied())
+        aliases
+            .iter()
+            .find_map(|alias| self.index_by_name.get(&normalize_header(alias)).copied())
     }
 }
 
@@ -105,10 +119,16 @@ struct TickColumns {
 
 impl TickColumns {
     fn can_parse(lookup: &HeaderLookup) -> bool {
-        (lookup.find(&["timestamp", "date time", "datetime", "date_time", "ts"]).is_some()
+        (lookup
+            .find(&["timestamp", "date time", "datetime", "date_time", "ts"])
+            .is_some()
             || (lookup.find(&["date"]).is_some() && lookup.find(&["time"]).is_some()))
-            && lookup.find(&["trade price", "price", "last", "last price"]).is_some()
-            && lookup.find(&["trade size", "size", "volume", "qty", "quantity"]).is_some()
+            && lookup
+                .find(&["trade price", "price", "last", "last price"])
+                .is_some()
+            && lookup
+                .find(&["trade size", "size", "volume", "qty", "quantity"])
+                .is_some()
             && lookup.find(&["bid", "bid price", "bidprice"]).is_some()
             && lookup.find(&["ask", "ask price", "askprice"]).is_some()
     }
@@ -124,8 +144,12 @@ impl TickColumns {
             trade_size: lookup
                 .find(&["trade size", "size", "volume", "qty", "quantity"])
                 .context("missing trade size column")?,
-            bid_price: lookup.find(&["bid", "bid price", "bidprice"]).context("missing bid price column")?,
-            ask_price: lookup.find(&["ask", "ask price", "askprice"]).context("missing ask price column")?,
+            bid_price: lookup
+                .find(&["bid", "bid price", "bidprice"])
+                .context("missing bid price column")?,
+            ask_price: lookup
+                .find(&["ask", "ask price", "askprice"])
+                .context("missing ask price column")?,
             symbol_contract: lookup.find(&["symbol", "symbol_contract", "contract"]),
         })
     }
@@ -153,10 +177,20 @@ impl OhlcColumns {
             open: lookup.find(&["open"]).context("missing open column")?,
             high: lookup.find(&["high"]).context("missing high column")?,
             low: lookup.find(&["low"]).context("missing low column")?,
-            close: lookup.find(&["last", "close", "last price"]).context("missing close column")?,
-            volume: lookup.find(&["volume", "vol"]).context("missing volume column")?,
+            close: lookup
+                .find(&["last", "close", "last price"])
+                .context("missing close column")?,
+            volume: lookup
+                .find(&["volume", "vol"])
+                .context("missing volume column")?,
             trade_count: lookup
-                .find(&["numberoftrades", "number of trades", "trades", "trade_count", "trade count"])
+                .find(&[
+                    "numberoftrades",
+                    "number of trades",
+                    "trades",
+                    "trade_count",
+                    "trade count",
+                ])
                 .context("missing trade_count column")?,
             symbol_contract: lookup.find(&["symbol", "symbol_contract", "contract"]),
         })
@@ -169,7 +203,13 @@ fn parse_tick_record(
     dataset_timezone: Tz,
     fallback_symbol: Option<&str>,
 ) -> anyhow::Result<CanonicalTick> {
-    let ts = parse_record_timestamp(record, columns.timestamp, columns.date, columns.time, dataset_timezone)?;
+    let ts = parse_record_timestamp(
+        record,
+        columns.timestamp,
+        columns.date,
+        columns.time,
+        dataset_timezone,
+    )?;
     let symbol_contract = record
         .get(columns.symbol_contract.unwrap_or(usize::MAX))
         .filter(|value| !value.is_empty())
@@ -180,10 +220,10 @@ fn parse_tick_record(
     Ok(CanonicalTick::new(
         ts,
         &symbol_contract,
-        parse_f64(record, columns.trade_price)?,
-        parse_f64(record, columns.trade_size)?,
-        Some(parse_f64(record, columns.bid_price)?),
-        Some(parse_f64(record, columns.ask_price)?),
+        parse_f64(record, columns.trade_price, "trade price")?,
+        parse_f64(record, columns.trade_size, "trade size")?,
+        Some(parse_f64(record, columns.bid_price, "bid price")?),
+        Some(parse_f64(record, columns.ask_price, "ask price")?),
     ))
 }
 
@@ -193,7 +233,13 @@ fn parse_ohlc_record(
     dataset_timezone: Tz,
     fallback_symbol: Option<&str>,
 ) -> anyhow::Result<TimeBarRow> {
-    let ts = parse_record_timestamp(record, columns.timestamp, columns.date, columns.time, dataset_timezone)?;
+    let ts = parse_record_timestamp(
+        record,
+        columns.timestamp,
+        columns.date,
+        columns.time,
+        dataset_timezone,
+    )?;
     let symbol_contract = record
         .get(columns.symbol_contract.unwrap_or(usize::MAX))
         .filter(|value| !value.is_empty())
@@ -208,12 +254,12 @@ fn parse_ohlc_record(
         session_date: localized.date_naive(),
         symbol_contract,
         kind: TradingBarKind::Time("1m".to_string()),
-        open: parse_f64(record, columns.open)?,
-        high: parse_f64(record, columns.high)?,
-        low: parse_f64(record, columns.low)?,
-        close: parse_f64(record, columns.close)?,
-        volume: parse_f64(record, columns.volume)?,
-        trade_count: parse_f64(record, columns.trade_count)? as u64,
+        open: parse_f64(record, columns.open, "open")?,
+        high: parse_f64(record, columns.high, "high")?,
+        low: parse_f64(record, columns.low, "low")?,
+        close: parse_f64(record, columns.close, "close")?,
+        volume: parse_f64(record, columns.volume, "volume")?,
+        trade_count: parse_f64(record, columns.trade_count, "trade_count")? as u64,
     };
 
     Ok(TimeBarRow::from_bar(trading_bar))
@@ -227,16 +273,14 @@ fn parse_record_timestamp(
     dataset_timezone: Tz,
 ) -> anyhow::Result<DateTime<Utc>> {
     if let Some(index) = timestamp_column {
-        return parse_datetime_value(record.get(index).unwrap_or_default(), dataset_timezone);
+        return parse_datetime_field(record, index, "timestamp", dataset_timezone);
     }
 
-    let date_value = record
-        .get(date_column.context("missing date column")?)
-        .context("missing date value")?;
-    let time_value = record
-        .get(time_column.context("missing time column")?)
-        .context("missing time value")?;
-    parse_datetime_value(&format!("{date_value} {time_value}"), dataset_timezone)
+    let date_value = parse_text_field(record, date_column.context("missing date column")?, "date")?;
+    let time_value = parse_text_field(record, time_column.context("missing time column")?, "time")?;
+    parse_datetime_value(&format!("{date_value} {time_value}"), dataset_timezone).with_context(
+        || format!("invalid timestamp from date/time fields: {date_value} {time_value}"),
+    )
 }
 
 fn parse_datetime_value(value: &str, dataset_timezone: Tz) -> anyhow::Result<DateTime<Utc>> {
@@ -264,24 +308,48 @@ fn parse_datetime_value(value: &str, dataset_timezone: Tz) -> anyhow::Result<Dat
     anyhow::bail!("unsupported timestamp format: {trimmed}")
 }
 
-fn parse_f64(record: &StringRecord, index: usize) -> anyhow::Result<f64> {
-    record
+fn parse_datetime_field(
+    record: &StringRecord,
+    index: usize,
+    field_name: &str,
+    dataset_timezone: Tz,
+) -> anyhow::Result<DateTime<Utc>> {
+    let value = parse_text_field(record, index, field_name)?;
+    parse_datetime_value(value, dataset_timezone)
+        .with_context(|| format!("invalid {field_name}: {value}"))
+}
+
+fn parse_text_field<'a>(
+    record: &'a StringRecord,
+    index: usize,
+    field_name: &str,
+) -> anyhow::Result<&'a str> {
+    let value = record
         .get(index)
-        .context("missing numeric value")?
-        .trim()
+        .with_context(|| format!("missing {field_name} value at column {}", index + 1))?
+        .trim();
+    if value.is_empty() {
+        anyhow::bail!("{field_name} is empty at column {}", index + 1);
+    }
+    Ok(value)
+}
+
+fn parse_f64(record: &StringRecord, index: usize, field_name: &str) -> anyhow::Result<f64> {
+    let value = parse_text_field(record, index, field_name)?;
+    value
         .parse::<f64>()
-        .with_context(|| "invalid numeric value")
+        .with_context(|| format!("invalid {field_name}: {value}"))
 }
 
 fn normalize_header(value: &str) -> String {
-    value
-        .trim()
-        .to_lowercase()
-        .replace([' ', '-', '.'], "_")
+    value.trim().to_lowercase().replace([' ', '-', '.'], "_")
 }
 
 fn detect_delimiter(bytes: &[u8]) -> u8 {
-    let first_line = bytes.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    let first_line = bytes
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
     if first_line.contains(&b'\t') {
         b'\t'
     } else {
@@ -346,5 +414,31 @@ mod tests {
             ParsedMarketData::Ohlc1m(rows) => assert_eq!(rows[0].timeframe, "1m"),
             ParsedMarketData::Ticks(_) => panic!("expected ohlc rows"),
         }
+    }
+
+    #[test]
+    fn reports_bad_numeric_field_with_line_context() {
+        let path = write_fixture(
+            "backtest-rust-bad-number.csv",
+            "timestamp,trade price,trade size,bid price,ask price\n2026-03-01T14:30:00Z,not-a-number,2,99.75,100.0\n",
+        );
+        let error = parse_market_data_file(&path, New_York, Some("NQH6")).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to parse tick row 2"));
+        assert!(message.contains("invalid trade price: not-a-number"));
+    }
+
+    #[test]
+    fn reports_bad_timestamp_with_line_context() {
+        let path = write_fixture(
+            "backtest-rust-bad-ts.txt",
+            "date\ttime\ttrade price\ttrade size\tbid price\task price\tsymbol\n2026-03-01\tbad-time\t100.0\t2\t99.75\t100.0\tNQH6\n",
+        );
+        let error = parse_market_data_file(&path, New_York, None).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to parse tick row 2"));
+        assert!(message.contains("invalid timestamp from date/time fields: 2026-03-01 bad-time"));
     }
 }
