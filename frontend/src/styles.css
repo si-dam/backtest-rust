@@ -212,8 +212,28 @@ button {
   gap: 16px;
 }
 
+.run-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .metric-grid {
   margin-top: 12px;
+}
+
+.detail-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-bottom: 16px;
+}
+
+.detail-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(227, 216, 198, 0.55);
 }
 
 .metric-label {

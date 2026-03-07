@@ -3,9 +3,12 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   createBacktestJob,
   getBacktestRunAnalytics,
+  getBacktestRun,
   getBacktestRuns,
   getBacktestRunTrades,
   getJob,
+  type BacktestRunRecord,
+  type JobRecord,
 } from "../lib/api";
 
 interface BacktestsPanelProps {
@@ -86,6 +89,12 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
     },
   });
 
+  const runDetailQuery = useQuery({
+    queryKey: ["backtest-run", selectedRunId],
+    queryFn: () => getBacktestRun(selectedRunId!),
+    enabled: Boolean(selectedRunId),
+  });
+
   const tradesQuery = useQuery({
     queryKey: ["backtest-trades", selectedRunId],
     queryFn: () => getBacktestRunTrades(selectedRunId!),
@@ -97,6 +106,18 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
     queryFn: () => getBacktestRunAnalytics(selectedRunId!),
     enabled: Boolean(selectedRunId),
   });
+
+  useEffect(() => {
+    const runIds = readJobRunIds(jobQuery.data);
+    if (runIds.length > 0) {
+      setSelectedRunId(runIds[0]);
+    }
+  }, [jobQuery.data]);
+
+  const selectedRun = runDetailQuery.data;
+  const selectedParams = selectedRun?.params_json ?? {};
+  const splitMeta = asRecord(selectedParams.split);
+  const latestJobSummary = summarizeJobResult(jobQuery.data);
 
   return (
     <section className="panel-grid">
@@ -190,7 +211,21 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
           </button>
         </div>
         {createJobMutation.isError ? <p className="error-copy">{createJobMutation.error.message}</p> : null}
-        {jobQuery.data ? <pre className="json-card compact-card">{JSON.stringify(jobQuery.data, null, 2)}</pre> : null}
+        {latestJobSummary ? (
+          <div className="job-card">
+            <div className="profile-header">
+              <strong>Latest job result</strong>
+              <span className={`status-badge status-${jobQuery.data?.status ?? "queued"}`}>{jobQuery.data?.status}</span>
+            </div>
+            <p className="microcopy">
+              {latestJobSummary.createdRuns} run(s), {latestJobSummary.tradeCount} trade(s)
+              {latestJobSummary.splitGroupId ? `, split group ${latestJobSummary.splitGroupId}` : ""}
+            </p>
+            {latestJobSummary.runIds.length > 0 ? (
+              <p className="microcopy">Created runs: {latestJobSummary.runIds.join(", ")}</p>
+            ) : null}
+          </div>
+        ) : null}
       </article>
 
       <article className="panel">
@@ -211,9 +246,15 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
               onClick={() => setSelectedRunId(run.id)}
               type="button"
             >
-              <strong>{run.name}</strong>
+              <div className="run-row">
+                <strong>{run.name}</strong>
+                <span className={`status-badge status-${run.status}`}>{run.status}</span>
+              </div>
               <span className="microcopy">
-                {run.strategy_id} • {run.status} • {new Date(run.updated_at).toLocaleString()}
+                {run.strategy_id}
+                {readRunSegment(run) ? ` • ${readRunSegment(run)?.toUpperCase()}` : ""}
+                {" • "}
+                {new Date(run.updated_at).toLocaleString()}
               </span>
             </button>
           ))}
@@ -224,10 +265,48 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
         <div className="panel-header">
           <div>
             <p className="eyebrow">Run detail</p>
-            <h2>{selectedRunId ?? "Select a run"}</h2>
+            <h2>{selectedRun?.name ?? selectedRunId ?? "Select a run"}</h2>
           </div>
           <span className="pill">{analyticsQuery.data?.analytics.trades ?? 0} trades</span>
         </div>
+        {selectedRun ? (
+          <div className="detail-grid">
+            <div className="detail-card">
+              <span className="metric-label">Window</span>
+              <strong>
+                {formatMaybeDate(selectedParams.start)} to {formatMaybeDate(selectedParams.end)}
+              </strong>
+              <p className="microcopy">
+                {String(selectedParams.timeframe ?? "1m")} bars • IB {String(selectedParams.ib_minutes ?? "15")}m •{" "}
+                {String(selectedParams.entry_mode ?? "first_outside")}
+              </p>
+            </div>
+            <div className="detail-card">
+              <span className="metric-label">Risk model</span>
+              <strong>{String(selectedParams.stop_mode ?? "or_boundary")}</strong>
+              <p className="microcopy">
+                TP {formatMaybeNumber(selectedParams.tp_r_multiple)}R • {String(selectedParams.contracts ?? 1)} contract(s)
+              </p>
+            </div>
+            <div className="detail-card">
+              <span className="metric-label">Session</span>
+              <strong>{String(selectedParams.timezone ?? "UTC")}</strong>
+              <p className="microcopy">
+                {String(selectedParams.session_start ?? "09:30:00")} to {String(selectedParams.session_end ?? "16:00:00")}
+              </p>
+            </div>
+            {splitMeta ? (
+              <div className="detail-card">
+                <span className="metric-label">Split</span>
+                <strong>{String(splitMeta.segment ?? "segment").toUpperCase()}</strong>
+                <p className="microcopy">
+                  Split at {formatMaybeDate(splitMeta.split_at)}
+                  {splitMeta.group_id ? ` • ${String(splitMeta.group_id)}` : ""}
+                </p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {analyticsQuery.data ? (
           <div className="metric-grid">
             <div>
@@ -248,6 +327,7 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             </div>
           </div>
         ) : null}
+        {selectedRun ? <pre className="json-card compact-card">{JSON.stringify(selectedRun.metrics_json, null, 2)}</pre> : null}
         <div className="stack">
           {tradesQuery.data?.trades.map((trade) => (
             <div className="job-card" key={trade.id}>
@@ -266,4 +346,59 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
       </article>
     </section>
   );
+}
+
+function summarizeJobResult(job?: JobRecord | null) {
+  const result = asRecord(job?.result_json);
+  if (!result) {
+    return null;
+  }
+
+  return {
+    createdRuns: numberOrFallback(result.created_runs, 0),
+    tradeCount: numberOrFallback(result.trade_count, 0),
+    splitGroupId: typeof result.split_group_id === "string" ? result.split_group_id : null,
+    runIds: readRunIds(result.run_ids),
+  };
+}
+
+function readJobRunIds(job?: JobRecord | null) {
+  return readRunIds(asRecord(job?.result_json)?.run_ids);
+}
+
+function readRunSegment(run: BacktestRunRecord) {
+  const segment = asRecord(run.params_json.split)?.segment;
+  return typeof segment === "string" ? segment : null;
+}
+
+function readRunIds(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function numberOrFallback(value: unknown, fallback: number) {
+  return typeof value === "number" ? value : fallback;
+}
+
+function formatMaybeDate(value: unknown) {
+  if (typeof value !== "string") {
+    return "n/a";
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
+function formatMaybeNumber(value: unknown) {
+  return typeof value === "number" ? value.toFixed(2) : String(value ?? "n/a");
 }

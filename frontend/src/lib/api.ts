@@ -192,6 +192,10 @@ export function getBacktestRuns() {
   return fetchJson<{ runs: BacktestRunRecord[] }>("/backtests/runs");
 }
 
+export function getBacktestRun(runId: string) {
+  return fetchJson<BacktestRunRecord>(`/backtests/runs/${runId}`);
+}
+
 export function getBacktestRunTrades(runId: string) {
   return fetchJson<{ run_id: string; trades: BacktestTradeRecord[] }>(`/backtests/runs/${runId}/trades`);
 }
