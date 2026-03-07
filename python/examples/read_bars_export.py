@@ -6,8 +6,8 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Read a bars dataset export manifest and print a preview.")
-    parser.add_argument("manifest", type=Path, help="Path to manifest.json written by a bars dataset export job")
+    parser = argparse.ArgumentParser(description="Read a dataset export manifest and print a preview.")
+    parser.add_argument("manifest", type=Path, help="Path to manifest.json written by a dataset export job")
     parser.add_argument("--rows", type=int, default=10, help="Number of rows to print")
     return parser.parse_args()
 
@@ -16,7 +16,7 @@ def main() -> None:
     args = parse_args()
     manifest = json.loads(args.manifest.read_text())
     export_kind = manifest.get("export_kind")
-    if export_kind not in {"bars", "ticks"}:
+    if export_kind not in {"bars", "ticks", "preset_profiles", "backtest_trades"}:
         raise SystemExit(f"Unsupported export kind: {manifest.get('export_kind')}")
 
     try:

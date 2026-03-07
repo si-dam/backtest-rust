@@ -7,14 +7,21 @@ interface DatasetsPanelProps {
 }
 
 type ExportKind = "bars" | "ticks" | "backtest_trades";
+type ProfilePreset = "day" | "week" | "rth" | "eth";
+type ProfileMetric = "volume" | "delta";
 
 export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
-  const [exportKind, setExportKind] = useState<ExportKind>("bars");
+  const [exportKind, setExportKind] = useState<ExportKind | "preset_profiles">("bars");
   const [timeframe, setTimeframe] = useState("1m");
   const [barType, setBarType] = useState("time");
   const [barSize, setBarSize] = useState("1500");
   const [lookbackDays, setLookbackDays] = useState("5");
   const [selectedRunId, setSelectedRunId] = useState("");
+  const [preset, setPreset] = useState<ProfilePreset>("day");
+  const [timezone, setTimezone] = useState("America/New_York");
+  const [metric, setMetric] = useState<ProfileMetric>("volume");
+  const [tickAggregation, setTickAggregation] = useState("1");
+  const [valueAreaEnabled, setValueAreaEnabled] = useState(true);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const runsQuery = useQuery({
@@ -54,8 +61,18 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
             ? {
                 timeframe,
                 bar_type: barType,
-                bar_size:
-                  barType === "time" ? undefined : Number(barSize || "0"),
+                bar_size: barType === "time" ? undefined : Number(barSize || "0"),
+              }
+            : {}),
+          ...(exportKind === "preset_profiles"
+            ? {
+                preset,
+                timezone,
+                metric,
+                tick_aggregation: Number(tickAggregation || "1"),
+                value_area_enabled: valueAreaEnabled,
+                value_area_percent: 70,
+                max_segments: 12,
               }
             : {}),
         },
@@ -127,6 +144,7 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
               <option value="bars">Bars</option>
               <option value="ticks">Ticks</option>
               <option value="backtest_trades">Backtest trades</option>
+              <option value="preset_profiles">Preset profiles</option>
             </select>
           </label>
           {exportKind !== "backtest_trades" ? (
@@ -190,6 +208,67 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
               ) : null}
             </>
           ) : null}
+          {exportKind === "preset_profiles" ? (
+            <>
+              <label className="field">
+                <span className="field-label">Preset</span>
+                <select
+                  className="field-input"
+                  value={preset}
+                  onChange={(event) => setPreset(event.target.value as ProfilePreset)}
+                >
+                  <option value="day">Day</option>
+                  <option value="week">Week</option>
+                  <option value="rth">RTH</option>
+                  <option value="eth">ETH</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Metric</span>
+                <select
+                  className="field-input"
+                  value={metric}
+                  onChange={(event) => setMetric(event.target.value as ProfileMetric)}
+                >
+                  <option value="volume">Volume</option>
+                  <option value="delta">Delta</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Aggregation</span>
+                <select
+                  className="field-input"
+                  value={tickAggregation}
+                  onChange={(event) => setTickAggregation(event.target.value)}
+                >
+                  <option value="1">1x</option>
+                  <option value="2">2x</option>
+                  <option value="4">4x</option>
+                  <option value="8">8x</option>
+                </select>
+              </label>
+              <label className="field">
+                <span className="field-label">Timezone</span>
+                <select
+                  className="field-input"
+                  value={timezone}
+                  onChange={(event) => setTimezone(event.target.value)}
+                >
+                  <option value="America/New_York">America/New_York</option>
+                  <option value="America/Chicago">America/Chicago</option>
+                  <option value="UTC">UTC</option>
+                </select>
+              </label>
+              <label className="field checkbox-field">
+                <input
+                  checked={valueAreaEnabled}
+                  type="checkbox"
+                  onChange={(event) => setValueAreaEnabled(event.target.checked)}
+                />
+                <span className="field-label">Value area</span>
+              </label>
+            </>
+          ) : null}
           {exportKind === "backtest_trades" ? (
             <label className="field">
               <span className="field-label">Backtest run</span>
@@ -226,8 +305,8 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
           <p className="error-copy">{createJobMutation.error.message}</p>
         ) : null}
         <p className="microcopy">
-          Export jobs write Parquet plus a manifest under the configured artifact root. Use bars or
-          ticks for market datasets, or backtest trades for run output snapshots.
+          Export jobs write Parquet plus a manifest under the configured artifact root. Use bars,
+          ticks, preset profiles, or backtest trades depending on the dataset you want to hand off.
         </p>
       </article>
 
@@ -354,8 +433,10 @@ function summarizeExport(payload: Record<string, unknown>) {
     return [
       rowCount !== null ? `${rowCount} rows` : null,
       typeof request.symbol_contract === "string" ? request.symbol_contract : null,
+      typeof request.preset === "string" ? request.preset : null,
       typeof request.timeframe === "string" ? request.timeframe : null,
       typeof request.bar_type === "string" ? request.bar_type : null,
+      typeof request.metric === "string" ? request.metric : null,
     ]
       .filter(Boolean)
       .join(" • ");

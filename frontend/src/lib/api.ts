@@ -192,7 +192,7 @@ export function createBacktestJob(payload: {
 }
 
 export function createDatasetJob(payload: {
-  export_kind: "bars" | "ticks" | "backtest_trades";
+  export_kind: "bars" | "ticks" | "backtest_trades" | "preset_profiles";
   payload: Record<string, unknown>;
 }) {
   return postJson<typeof payload, { job_id: string }>("/datasets/jobs", payload);

@@ -3,7 +3,8 @@ use std::{fs::File, path::PathBuf, sync::Arc};
 use anyhow::Result;
 use app_core::{config::Settings, telemetry::init_tracing};
 use arrow_array::{
-    ArrayRef, Float64Array, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+    ArrayRef, BooleanArray, Float64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+    UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use backtest::{
@@ -14,10 +15,10 @@ use backtest::{
 use chrono::{DateTime, Utc};
 use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
 use market::{
-    build_large_orders_from_ticks, build_non_time_bars_from_ticks, build_profiles_for_ticks, build_time_bars_from_ticks,
-    derive_symbol_root, detect_tick_size, parse_market_data_file, sha256_hex,
-    summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick, CanonicalTickRow,
-    ClickHouseMarketStore, ParsedMarketData, TicksQuery,
+    build_large_orders_from_ticks, build_non_time_bars_from_ticks, build_profiles_for_ticks,
+    build_time_bars_from_ticks, derive_symbol_root, detect_tick_size, parse_market_data_file,
+    sha256_hex, summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick, CanonicalTickRow,
+    ClickHouseMarketStore, ParsedMarketData, PresetProfileQuery, TicksQuery,
 };
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
@@ -32,6 +33,30 @@ struct OrbRunSegment {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     split_meta: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+struct FlatPresetProfileRow {
+    profile_id: String,
+    symbol_contract: String,
+    preset: String,
+    metric: String,
+    timezone: String,
+    label: String,
+    segment_start: DateTime<Utc>,
+    segment_end: DateTime<Utc>,
+    tick_aggregation: u32,
+    value_area_enabled: bool,
+    value_area_percent: f64,
+    value_area_poc: Option<f64>,
+    value_area_low: Option<f64>,
+    value_area_high: Option<f64>,
+    value_area_volume: f64,
+    max_value: f64,
+    total_value: f64,
+    price_level: Option<f64>,
+    level_value: Option<f64>,
+    level_volume: Option<f64>,
 }
 
 #[tokio::main]
@@ -109,8 +134,10 @@ async fn dispatch_job(
             .await
         }
         "dataset_export" => {
-            handle_dataset_export(settings, jobs, market, backtests, job_id, worker_id, payload)
-                .await
+            handle_dataset_export(
+                settings, jobs, market, backtests, job_id, worker_id, payload,
+            )
+            .await
         }
         other => Err(format!("unknown job type: {other}")),
     }
@@ -443,7 +470,9 @@ async fn handle_build_bars(
             market
                 .replace_non_time_bars(symbol_contract, bar_type, bar_size, start, end, &bars)
                 .await
-                .map_err(|error| format!("failed to replace {bar_type}:{bar_size} bars: {error}"))?;
+                .map_err(|error| {
+                    format!("failed to replace {bar_type}:{bar_size} bars: {error}")
+                })?;
             inserted_non_time
                 .push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
         }
@@ -886,6 +915,17 @@ async fn handle_dataset_export(
             )
             .await
         }
+        "preset_profiles" => {
+            export_preset_profiles_dataset(
+                jobs,
+                market,
+                job_id,
+                worker_id,
+                &artifact_root,
+                export_payload,
+            )
+            .await
+        }
         other => Err(format!("unsupported export_kind: {other}")),
     }
 }
@@ -1197,7 +1237,9 @@ async fn export_backtest_trades_dataset(
         .await
         .map_err(|error| format!("failed to load backtest trades: {error}"))?;
 
-    let export_dir = artifact_root.join("dataset_exports").join(job_id.to_string());
+    let export_dir = artifact_root
+        .join("dataset_exports")
+        .join(job_id.to_string());
     fs::create_dir_all(&export_dir)
         .await
         .map_err(|error| format!("failed to create export directory: {error}"))?;
@@ -1274,6 +1316,190 @@ async fn export_backtest_trades_dataset(
         "export_kind": "backtest_trades",
         "manifest_path": manifest_path,
         "row_count": trades.len(),
+    }))
+}
+
+async fn export_preset_profiles_dataset(
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
+    artifact_root: &PathBuf,
+    payload: Value,
+) -> std::result::Result<Value, String> {
+    let symbol_contract = payload
+        .get("symbol_contract")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "preset_profiles export requires payload.symbol_contract".to_string())?;
+    let start = serde_json::from_value(
+        payload
+            .get("start")
+            .cloned()
+            .ok_or_else(|| "preset_profiles export requires payload.start".to_string())?,
+    )
+    .map_err(|error| format!("invalid export start: {error}"))?;
+    let end = serde_json::from_value(
+        payload
+            .get("end")
+            .cloned()
+            .ok_or_else(|| "preset_profiles export requires payload.end".to_string())?,
+    )
+    .map_err(|error| format!("invalid export end: {error}"))?;
+    let preset = payload
+        .get("preset")
+        .and_then(Value::as_str)
+        .unwrap_or("day")
+        .to_string();
+    let timezone = payload
+        .get("timezone")
+        .and_then(Value::as_str)
+        .unwrap_or("America/New_York")
+        .to_string();
+    let metric = payload
+        .get("metric")
+        .and_then(Value::as_str)
+        .unwrap_or("volume")
+        .to_string();
+    let tick_aggregation = payload
+        .get("tick_aggregation")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32)
+        .unwrap_or(1);
+    let value_area_enabled = payload
+        .get("value_area_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let value_area_percent = payload
+        .get("value_area_percent")
+        .and_then(Value::as_f64)
+        .unwrap_or(70.0);
+    let max_segments = payload
+        .get("max_segments")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32)
+        .unwrap_or(120);
+    let query = PresetProfileQuery {
+        start,
+        end,
+        preset: preset.clone(),
+        timezone: timezone.clone(),
+        metric: metric.clone(),
+        tick_aggregation,
+        value_area_enabled,
+        value_area_percent,
+        max_segments,
+    };
+    query
+        .validate()
+        .map_err(|error| format!("invalid preset profile export query: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "loading_export_data",
+        json!({
+            "export_kind": "preset_profiles",
+            "symbol_contract": symbol_contract,
+            "preset": preset,
+            "metric": metric,
+            "timezone": timezone,
+            "tick_aggregation": tick_aggregation,
+        }),
+    )
+    .await?;
+
+    let profiles = market
+        .load_preset_profiles(symbol_contract, &query)
+        .await
+        .map_err(|error| format!("failed to load preset profiles for export: {error}"))?;
+    let rows = flatten_preset_profile_rows(&profiles);
+
+    let export_dir = artifact_root
+        .join("dataset_exports")
+        .join(job_id.to_string());
+    fs::create_dir_all(&export_dir)
+        .await
+        .map_err(|error| format!("failed to create export directory: {error}"))?;
+    let data_path = export_dir.join("preset_profiles.parquet");
+    let manifest_path = export_dir.join("manifest.json");
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "writing_export_files",
+        json!({ "data_path": data_path, "row_count": rows.len() }),
+    )
+    .await?;
+    write_preset_profiles_parquet(&data_path, &rows)
+        .map_err(|error| format!("failed to write preset profiles parquet: {error}"))?;
+
+    let schema_version = "preset_profiles.v1";
+    let manifest = json!({
+        "job_id": job_id,
+        "export_kind": "preset_profiles",
+        "schema_version": schema_version,
+        "files": [
+            {
+                "kind": "parquet",
+                "path": data_path,
+                "rows": rows.len(),
+            }
+        ],
+        "request": {
+            "symbol_contract": symbol_contract,
+            "start": start,
+            "end": end,
+            "preset": preset,
+            "timezone": timezone,
+            "metric": metric,
+            "tick_aggregation": tick_aggregation,
+            "value_area_enabled": value_area_enabled,
+            "value_area_percent": value_area_percent,
+            "max_segments": max_segments,
+        },
+        "profiles": {
+            "segments": profiles.profiles.len(),
+            "row_count": rows.len(),
+        },
+        "row_count": rows.len(),
+    });
+
+    let manifest_string = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed to encode manifest: {error}"))?;
+    fs::write(&manifest_path, manifest_string)
+        .await
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "recording_export",
+        json!({ "manifest_path": manifest_path }),
+    )
+    .await?;
+    let export_record = jobs
+        .record_dataset_export(
+            Some(job_id),
+            "preset_profiles",
+            manifest_path
+                .to_str()
+                .ok_or_else(|| "manifest path is not valid UTF-8".to_string())?,
+            schema_version,
+            manifest.clone(),
+        )
+        .await
+        .map_err(|error| format!("failed to record dataset export: {error}"))?;
+
+    Ok(json!({
+        "status": "dataset_exported",
+        "export_id": export_record.id,
+        "export_kind": "preset_profiles",
+        "manifest_path": manifest_path,
+        "segment_count": profiles.profiles.len(),
+        "row_count": rows.len(),
     }))
 }
 
@@ -1470,8 +1696,16 @@ fn write_backtest_trades_parquet(
         Field::new("created_at", DataType::Utf8, false),
     ]));
 
-    let ids = StringArray::from(rows.iter().map(|row| row.id.to_string()).collect::<Vec<_>>());
-    let run_ids = StringArray::from(rows.iter().map(|row| row.run_id.to_string()).collect::<Vec<_>>());
+    let ids = StringArray::from(
+        rows.iter()
+            .map(|row| row.id.to_string())
+            .collect::<Vec<_>>(),
+    );
+    let run_ids = StringArray::from(
+        rows.iter()
+            .map(|row| row.run_id.to_string())
+            .collect::<Vec<_>>(),
+    );
     let symbol_contracts = StringArray::from(
         rows.iter()
             .map(|row| row.symbol_contract.clone())
@@ -1487,7 +1721,8 @@ fn write_backtest_trades_parquet(
             .map(|row| row.exit_ts.map(|value| value.to_rfc3339()))
             .collect::<Vec<_>>(),
     );
-    let entry_prices = Float64Array::from(rows.iter().map(|row| row.entry_price).collect::<Vec<_>>());
+    let entry_prices =
+        Float64Array::from(rows.iter().map(|row| row.entry_price).collect::<Vec<_>>());
     let exit_prices = Float64Array::from(rows.iter().map(|row| row.exit_price).collect::<Vec<_>>());
     let qty = Float64Array::from(rows.iter().map(|row| row.qty).collect::<Vec<_>>());
     let pnl = Float64Array::from(rows.iter().map(|row| row.pnl).collect::<Vec<_>>());
@@ -1516,6 +1751,214 @@ fn write_backtest_trades_parquet(
             Arc::new(pnl),
             Arc::new(notes),
             Arc::new(created_at),
+        ],
+    )?;
+
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+fn flatten_preset_profile_rows(
+    response: &market::PresetProfilesResponse,
+) -> Vec<FlatPresetProfileRow> {
+    let mut rows = Vec::new();
+    for profile in &response.profiles {
+        if profile.levels.is_empty() {
+            rows.push(FlatPresetProfileRow {
+                profile_id: profile.id.to_string(),
+                symbol_contract: response.symbol_contract.clone(),
+                preset: response.preset.clone(),
+                metric: response.metric.clone(),
+                timezone: response.timezone.clone(),
+                label: profile.label.clone(),
+                segment_start: profile.start,
+                segment_end: profile.end,
+                tick_aggregation: response.tick_aggregation,
+                value_area_enabled: profile.value_area_enabled,
+                value_area_percent: profile.value_area_percent,
+                value_area_poc: profile.value_area_poc,
+                value_area_low: profile.value_area_low,
+                value_area_high: profile.value_area_high,
+                value_area_volume: profile.value_area_volume,
+                max_value: profile.max_value,
+                total_value: profile.total_value,
+                price_level: None,
+                level_value: None,
+                level_volume: None,
+            });
+            continue;
+        }
+
+        for level in &profile.levels {
+            rows.push(FlatPresetProfileRow {
+                profile_id: profile.id.to_string(),
+                symbol_contract: response.symbol_contract.clone(),
+                preset: response.preset.clone(),
+                metric: response.metric.clone(),
+                timezone: response.timezone.clone(),
+                label: profile.label.clone(),
+                segment_start: profile.start,
+                segment_end: profile.end,
+                tick_aggregation: response.tick_aggregation,
+                value_area_enabled: profile.value_area_enabled,
+                value_area_percent: profile.value_area_percent,
+                value_area_poc: profile.value_area_poc,
+                value_area_low: profile.value_area_low,
+                value_area_high: profile.value_area_high,
+                value_area_volume: profile.value_area_volume,
+                max_value: profile.max_value,
+                total_value: profile.total_value,
+                price_level: Some(level.price_level),
+                level_value: Some(level.value),
+                level_volume: Some(level.volume),
+            });
+        }
+    }
+    rows
+}
+
+fn write_preset_profiles_parquet(
+    path: &PathBuf,
+    rows: &[FlatPresetProfileRow],
+) -> anyhow::Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("profile_id", DataType::Utf8, false),
+        Field::new("symbol_contract", DataType::Utf8, false),
+        Field::new("preset", DataType::Utf8, false),
+        Field::new("metric", DataType::Utf8, false),
+        Field::new("timezone", DataType::Utf8, false),
+        Field::new("label", DataType::Utf8, false),
+        Field::new(
+            "segment_start",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::<str>::from("UTC"))),
+            false,
+        ),
+        Field::new(
+            "segment_end",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::<str>::from("UTC"))),
+            false,
+        ),
+        Field::new("tick_aggregation", DataType::UInt64, false),
+        Field::new("value_area_enabled", DataType::Boolean, false),
+        Field::new("value_area_percent", DataType::Float64, false),
+        Field::new("value_area_poc", DataType::Float64, true),
+        Field::new("value_area_low", DataType::Float64, true),
+        Field::new("value_area_high", DataType::Float64, true),
+        Field::new("value_area_volume", DataType::Float64, false),
+        Field::new("max_value", DataType::Float64, false),
+        Field::new("total_value", DataType::Float64, false),
+        Field::new("price_level", DataType::Float64, true),
+        Field::new("level_value", DataType::Float64, true),
+        Field::new("level_volume", DataType::Float64, true),
+    ]));
+
+    let profile_ids = StringArray::from(
+        rows.iter()
+            .map(|row| row.profile_id.clone())
+            .collect::<Vec<_>>(),
+    );
+    let symbol_contracts = StringArray::from(
+        rows.iter()
+            .map(|row| row.symbol_contract.clone())
+            .collect::<Vec<_>>(),
+    );
+    let presets = StringArray::from(
+        rows.iter()
+            .map(|row| row.preset.clone())
+            .collect::<Vec<_>>(),
+    );
+    let metrics = StringArray::from(
+        rows.iter()
+            .map(|row| row.metric.clone())
+            .collect::<Vec<_>>(),
+    );
+    let timezones = StringArray::from(
+        rows.iter()
+            .map(|row| row.timezone.clone())
+            .collect::<Vec<_>>(),
+    );
+    let labels = StringArray::from(rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>());
+    let segment_start = TimestampMicrosecondArray::from(
+        rows.iter()
+            .map(|row| row.segment_start.timestamp_micros())
+            .collect::<Vec<_>>(),
+    );
+    let segment_end = TimestampMicrosecondArray::from(
+        rows.iter()
+            .map(|row| row.segment_end.timestamp_micros())
+            .collect::<Vec<_>>(),
+    );
+    let tick_aggregation = UInt64Array::from(
+        rows.iter()
+            .map(|row| row.tick_aggregation as u64)
+            .collect::<Vec<_>>(),
+    );
+    let value_area_enabled = BooleanArray::from(
+        rows.iter()
+            .map(|row| row.value_area_enabled)
+            .collect::<Vec<_>>(),
+    );
+    let value_area_percent = Float64Array::from(
+        rows.iter()
+            .map(|row| row.value_area_percent)
+            .collect::<Vec<_>>(),
+    );
+    let value_area_poc = Float64Array::from(
+        rows.iter()
+            .map(|row| row.value_area_poc)
+            .collect::<Vec<_>>(),
+    );
+    let value_area_low = Float64Array::from(
+        rows.iter()
+            .map(|row| row.value_area_low)
+            .collect::<Vec<_>>(),
+    );
+    let value_area_high = Float64Array::from(
+        rows.iter()
+            .map(|row| row.value_area_high)
+            .collect::<Vec<_>>(),
+    );
+    let value_area_volume = Float64Array::from(
+        rows.iter()
+            .map(|row| row.value_area_volume)
+            .collect::<Vec<_>>(),
+    );
+    let max_value = Float64Array::from(rows.iter().map(|row| row.max_value).collect::<Vec<_>>());
+    let total_value =
+        Float64Array::from(rows.iter().map(|row| row.total_value).collect::<Vec<_>>());
+    let price_level =
+        Float64Array::from(rows.iter().map(|row| row.price_level).collect::<Vec<_>>());
+    let level_value =
+        Float64Array::from(rows.iter().map(|row| row.level_value).collect::<Vec<_>>());
+    let level_volume =
+        Float64Array::from(rows.iter().map(|row| row.level_volume).collect::<Vec<_>>());
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(profile_ids) as ArrayRef,
+            Arc::new(symbol_contracts),
+            Arc::new(presets),
+            Arc::new(metrics),
+            Arc::new(timezones),
+            Arc::new(labels),
+            Arc::new(segment_start),
+            Arc::new(segment_end),
+            Arc::new(tick_aggregation),
+            Arc::new(value_area_enabled),
+            Arc::new(value_area_percent),
+            Arc::new(value_area_poc),
+            Arc::new(value_area_low),
+            Arc::new(value_area_high),
+            Arc::new(value_area_volume),
+            Arc::new(max_value),
+            Arc::new(total_value),
+            Arc::new(price_level),
+            Arc::new(level_value),
+            Arc::new(level_volume),
         ],
     )?;
 
