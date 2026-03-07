@@ -273,7 +273,12 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
                 <strong>{datasetExport.export_kind}</strong>
                 <span>{new Date(datasetExport.created_at).toLocaleString()}</span>
               </div>
-              <p className="microcopy">{datasetExport.schema_version}</p>
+              <p className="microcopy">
+                {datasetExport.schema_version}
+                {datasetExport.job_id ? ` • job ${datasetExport.job_id}` : ""}
+                {datasetExport.job_id === activeJobId ? " • latest job" : ""}
+              </p>
+              <p className="microcopy">{summarizeExport(datasetExport.payload_json)}</p>
               <p className="microcopy">{datasetExport.manifest_path}</p>
               <pre className="json-card compact-card">
                 {JSON.stringify(datasetExport.payload_json, null, 2)}
@@ -284,4 +289,40 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
       </article>
     </section>
   );
+}
+
+function summarizeExport(payload: Record<string, unknown>) {
+  const rowCount = typeof payload.row_count === "number" ? payload.row_count : null;
+  const request = asRecord(payload.request);
+  const run = asRecord(payload.run);
+
+  if (run) {
+    return [
+      rowCount !== null ? `${rowCount} rows` : null,
+      typeof run.name === "string" ? run.name : null,
+      typeof run.strategy_id === "string" ? run.strategy_id : null,
+    ]
+      .filter(Boolean)
+      .join(" • ");
+  }
+
+  if (request) {
+    return [
+      rowCount !== null ? `${rowCount} rows` : null,
+      typeof request.symbol_contract === "string" ? request.symbol_contract : null,
+      typeof request.timeframe === "string" ? request.timeframe : null,
+      typeof request.bar_type === "string" ? request.bar_type : null,
+    ]
+      .filter(Boolean)
+      .join(" • ");
+  }
+
+  return rowCount !== null ? `${rowCount} rows` : "Export manifest";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
 }
