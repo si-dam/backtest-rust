@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Dev: Infra Up",
+      "type": "shell",
+      "command": "./scripts/devcontainer-infra.sh up",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dev: Infra Down",
+      "type": "shell",
+      "command": "./scripts/devcontainer-infra.sh down",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dev: Infra Logs",
+      "type": "shell",
+      "command": "./scripts/devcontainer-infra.sh logs",
+      "problemMatcher": []
+    },
+    {
+      "label": "Dev: API + Worker",
+      "type": "shell",
+      "command": "./scripts/devcontainer-run.sh",
+      "problemMatcher": [],
+      "isBackground": false
+    },
+    {
+      "label": "Dev: API (Reload)",
+      "type": "shell",
+      "command": "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir tests",
+      "problemMatcher": [],
+      "dependsOn": ["Dev: Infra Up"]
+    },
+    {
+      "label": "Dev: Worker",
+      "type": "shell",
+      "command": "python -m app.worker.run_worker",
+      "problemMatcher": [],
+      "dependsOn": ["Dev: Infra Up"]
+    }
+  ]
+}

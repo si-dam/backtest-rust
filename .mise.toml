@@ -1,0 +1,4 @@
+[tools]
+rust = "1.89.0"
+node = "22"
+python = "3.11"

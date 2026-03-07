@@ -1,0 +1,6 @@
+{
+  "created_at": "2026-02-20T07:15:27.745137",
+  "metrics_path": "metrics.csv",
+  "trades_path": "trades.csv",
+  "bars_dir": "bars"
+}

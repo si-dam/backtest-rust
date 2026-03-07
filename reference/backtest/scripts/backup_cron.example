@@ -1,0 +1,2 @@
+# Daily 02:30 local time
+30 2 * * * cd /path/to/backtest && ./scripts/backup.sh >> /var/log/backtest-backup.log 2>&1

@@ -1,0 +1,42 @@
+[project]
+name = "futures-backtest-platform"
+version = "0.1.0"
+description = "Modular futures backtest platform with chart-first UX"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "sqlalchemy>=2.0.30",
+  "psycopg[binary]>=3.2.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.3.4",
+  "email-validator>=2.2.0",
+  "python-jose[cryptography]>=3.3.0",
+  "passlib>=1.7.4",
+  "python-multipart>=0.0.9",
+  "redis>=5.0.7",
+  "rq>=1.16.2",
+  "duckdb>=1.0.0",
+  "pandas>=2.2.2",
+  "numpy>=2.0.1",
+  "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.2",
+  "pytest-asyncio>=0.23.8",
+  "ruff>=0.6.1",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

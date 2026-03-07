@@ -1,0 +1,14 @@
+/target/
+/node_modules/
+/dist/
+*.tsbuildinfo
+/.DS_Store
+/.env
+/.env.local
+/.vite/
+/.idea/
+/.vscode/
+/.sqlx/
+/.pnpm-store/
+/artifacts/
+/data/

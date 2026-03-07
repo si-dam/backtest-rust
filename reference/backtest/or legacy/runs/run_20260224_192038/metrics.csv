@@ -1,0 +1,2 @@
+trades,wins,losses,full_tp_wins,full_losses,win_rate,total_pnl,avg_pnl,total_r,avg_r,combo,timeframe_min,ib_minutes,stop_mode,tp_r_multiple,entry_mode,vectorbt_total_return
+11,4,7,0,4,0.36363636363636365,-188.75,-17.15909090909091,-2.0091870169284216,-0.18265336517531106,tf1_ib15,1,15,or_boundary,2.0,reentry_after_stop,7.026219884324309

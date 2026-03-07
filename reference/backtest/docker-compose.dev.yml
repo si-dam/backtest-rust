@@ -1,0 +1,31 @@
+services:
+  # Dev override: mount source into the container so UI/CSS/JS changes show up
+  # without rebuilding the image, and enable uvicorn reload.
+  web:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app --reload-dir tests
+    environment:
+      # When enabled, `/dash/*` served by FastAPI redirects to the Vite dev server (5173).
+      DASH_DEV_REDIRECT: "1"
+      DASH_DEV_REDIRECT_PORT: "5173"
+    volumes:
+      - ./app:/app/app
+      - ./tests:/app/tests
+
+  dash:
+    image: node:20-bookworm-slim
+    container_name: backtest-dash
+    working_dir: /frontend/dash
+    environment:
+      VITE_API_PROXY_TARGET: http://web:8000
+      VITE_USE_POLLING: "1"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/dash:/frontend/dash
+      - dash_node_modules:/frontend/dash/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    depends_on:
+      - web
+
+volumes:
+  dash_node_modules:

@@ -1,0 +1,8 @@
+[build]
+target-dir = "target"
+
+[alias]
+api = "run -p runtime-api"
+worker = "run -p runtime-worker"
+fmt-all = "fmt --all"
+check-all = "check --workspace"

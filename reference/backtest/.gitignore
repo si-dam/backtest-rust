@@ -1,0 +1,26 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.pyc
+.env
+.env.devcontainer
+*.log
+.DS_Store
+coverage.xml
+htmlcov/
+*.egg-info/
+screenshots/
+frontend/dash/node_modules/
+frontend/dash/dist/
+frontend/dash/*.tsbuildinfo
+
+# local data
+data/
+data/datasets/*.duckdb
+data/datasets/*.wal
+data/watch/*.csv
+data/**/*.txt
+
+# postgres volume
+postgres_data/

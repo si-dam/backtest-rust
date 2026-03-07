@@ -1,0 +1,49 @@
+services:
+  web:
+    build: .
+    container_name: backtest-web
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./data/datasets:/datasets
+      - ./data/watch:/watch
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build: .
+    container_name: backtest-worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./data/datasets:/datasets
+      - ./data/watch:/watch
+    command: python -m app.worker.run_worker
+
+  redis:
+    image: redis:7-alpine
+    container_name: backtest-redis
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: backtest-postgres
+    environment:
+      POSTGRES_DB: backtest
+      POSTGRES_USER: backtest
+      POSTGRES_PASSWORD: backtest
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

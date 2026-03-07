@@ -1,0 +1,20 @@
+services:
+  # When running `docker compose` from inside the VS Code devcontainer, the Docker
+  # engine is typically Docker Desktop on macOS. Docker Desktop cannot mount the
+  # devcontainer path (`/workspaces/backtest`) unless it's explicitly shared.
+  #
+  # This override swaps bind-mount sources to the macOS host repo path so the
+  # existing `./data/...` mounts work without changing the base compose file.
+  #
+  # Usage (on macOS host):
+  # - export BACKTEST_HOST_REPO_ROOT=/Users/<you>/dev/backtest
+  # - docker compose -f docker-compose.yml -f docker-compose.devcontainer.yml up -d --build web
+  web:
+    volumes:
+      - ${BACKTEST_HOST_REPO_ROOT:?set BACKTEST_HOST_REPO_ROOT}/data/datasets:/datasets
+      - ${BACKTEST_HOST_REPO_ROOT:?set BACKTEST_HOST_REPO_ROOT}/data/watch:/watch
+
+  worker:
+    volumes:
+      - ${BACKTEST_HOST_REPO_ROOT:?set BACKTEST_HOST_REPO_ROOT}/data/datasets:/datasets
+      - ${BACKTEST_HOST_REPO_ROOT:?set BACKTEST_HOST_REPO_ROOT}/data/watch:/watch

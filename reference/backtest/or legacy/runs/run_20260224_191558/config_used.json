@@ -1,0 +1,21 @@
+{
+  "data_path": "data/processed/nq_rth_200day_ticks.parquet",
+  "session_start": "09:30:00",
+  "session_end": "16:00:00",
+  "ib_windows_min": [
+    15
+  ],
+  "timeframes_min": [
+    1
+  ],
+  "big_trade_threshold": 25,
+  "stop_mode": "or_boundary",
+  "tp_r_multiple": 2.0,
+  "cost_model": "none",
+  "symbol": "NQ",
+  "ib_minutes": 15,
+  "timeframe_min": 1,
+  "entry_mode": "first_outside",
+  "date_start": "2025-11-28",
+  "date_end": "2026-02-19"
+}

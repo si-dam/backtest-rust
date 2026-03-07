@@ -1,0 +1,78 @@
+{
+  "symbol_contract": "NQH26",
+  "profile_timezone": "America/New_York",
+  "tick_aggregation": 1,
+  "window": {
+    "start": "2026-02-20T21:59:59.196000+00:00",
+    "end": "2026-02-27T21:59:59.196000+00:00",
+    "duration_days": 7
+  },
+  "presets": [
+    "week",
+    "day",
+    "rth",
+    "eth"
+  ],
+  "per_preset": {
+    "week": {
+      "profile_count": 2,
+      "level_count": 4306,
+      "deep_size_bytes": 1041841,
+      "deep_size_human": "1,017.42 KiB",
+      "json_size_bytes": 230519,
+      "json_size_human": "225.12 KiB"
+    },
+    "day": {
+      "profile_count": 7,
+      "level_count": 8761,
+      "deep_size_bytes": 2116450,
+      "deep_size_human": "2.02 MiB",
+      "json_size_bytes": 468099,
+      "json_size_human": "457.13 KiB"
+    },
+    "rth": {
+      "profile_count": 5,
+      "level_count": 6926,
+      "deep_size_bytes": 1672998,
+      "deep_size_human": "1.60 MiB",
+      "json_size_bytes": 369118,
+      "json_size_human": "360.47 KiB"
+    },
+    "eth": {
+      "profile_count": 7,
+      "level_count": 4707,
+      "deep_size_bytes": 1141906,
+      "deep_size_human": "1.09 MiB",
+      "json_size_bytes": 250794,
+      "json_size_human": "244.92 KiB"
+    }
+  },
+  "combined": {
+    "profile_count": 21,
+    "level_count": 24700,
+    "deep_size_bytes": 5967465,
+    "deep_size_human": "5.69 MiB",
+    "json_size_bytes": 1318560,
+    "json_size_human": "1.26 MiB"
+  },
+  "memory_runtime": {
+    "tracemalloc_current_bytes": 490656163,
+    "tracemalloc_current_human": "467.93 MiB",
+    "tracemalloc_peak_bytes": 1069841145,
+    "tracemalloc_peak_human": "1,020.28 MiB",
+    "tracemalloc_peak_delta_bytes": 1069841145,
+    "tracemalloc_peak_delta_human": "1,020.28 MiB",
+    "vmrss_before_bytes": 160882688,
+    "vmrss_before_human": "153.43 MiB",
+    "vmrss_after_bytes": 1244114944,
+    "vmrss_after_human": "1.16 GiB",
+    "vmrss_delta_bytes": 1083232256,
+    "vmrss_delta_human": "1.01 GiB",
+    "vmhwm_before_bytes": 344358912,
+    "vmhwm_before_human": "328.41 MiB",
+    "vmhwm_after_bytes": 1558093824,
+    "vmhwm_after_human": "1.45 GiB",
+    "vmhwm_delta_bytes": 1213734912,
+    "vmhwm_delta_human": "1.13 GiB"
+  }
+}
