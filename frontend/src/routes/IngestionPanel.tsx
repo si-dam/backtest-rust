@@ -60,7 +60,7 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
             <span className="field-label">File path</span>
             <input
               className="field-input"
-              placeholder="data/NQH6_ticks.csv"
+              placeholder="data/NQH6_ticks.txt"
               required
               value={filePath}
               onChange={(event) => setFilePath(event.target.value)}
@@ -91,7 +91,8 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
           <p className="error-copy">{createJobMutation.error.message}</p>
         ) : null}
         <p className="microcopy">
-          Phase 1 keeps ingest semantics server-local. The path must remain inside the configured ingest root.
+          Phase 1 keeps ingest semantics server-local. The path must remain inside the configured ingest root and can be
+          a comma-delimited `.csv` or tab-delimited `.txt` export.
         </p>
       </article>
 

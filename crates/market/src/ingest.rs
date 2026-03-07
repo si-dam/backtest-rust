@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::File,
-    io::BufReader,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -28,11 +27,12 @@ pub struct ParsedFileSummary {
 }
 
 pub fn parse_market_data_file(path: &Path, dataset_timezone: Tz, fallback_symbol: Option<&str>) -> anyhow::Result<ParsedMarketData> {
-    let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("unable to open {}", path.display()))?;
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)
         .trim(csv::Trim::All)
-        .from_reader(BufReader::new(file));
+        .delimiter(detect_delimiter(&bytes))
+        .from_reader(bytes.as_slice());
 
     let headers = reader.headers().context("missing headers")?.clone();
     let lookup = HeaderLookup::from_headers(&headers);
@@ -280,6 +280,15 @@ fn normalize_header(value: &str) -> String {
         .replace([' ', '-', '.'], "_")
 }
 
+fn detect_delimiter(bytes: &[u8]) -> u8 {
+    let first_line = bytes.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    if first_line.contains(&b'\t') {
+        b'\t'
+    } else {
+        b','
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
@@ -305,6 +314,23 @@ mod tests {
         assert_eq!(summary.schema_kind, "ticks");
         match parsed {
             ParsedMarketData::Ticks(rows) => assert_eq!(rows[0].symbol_contract, "NQH6"),
+            ParsedMarketData::Ohlc1m(_) => panic!("expected tick rows"),
+        }
+    }
+
+    #[test]
+    fn parses_tab_delimited_txt_tick_schema() {
+        let path = write_fixture(
+            "backtest-rust-ticks.txt",
+            "date\ttime\ttrade price\ttrade size\tbid price\task price\tsymbol\n2026-03-01\t09:30:00\t100.0\t2\t99.75\t100.0\tNQH6\n",
+        );
+        let parsed = parse_market_data_file(&path, New_York, None).unwrap();
+        match parsed {
+            ParsedMarketData::Ticks(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].symbol_contract, "NQH6");
+                assert_eq!(rows[0].trade_price, 100.0);
+            }
             ParsedMarketData::Ohlc1m(_) => panic!("expected tick rows"),
         }
     }

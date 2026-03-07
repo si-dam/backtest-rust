@@ -9,6 +9,8 @@ use serde::Deserialize;
 struct GoldenExpected {
     time_bars_1m: Vec<TimeBarRow>,
     tick_bars_3: Vec<NonTimeBarRow>,
+    volume_bars_5: Vec<NonTimeBarRow>,
+    range_bars_2: Vec<NonTimeBarRow>,
     profile_count: usize,
     profiles: Vec<GoldenProfile>,
 }
@@ -49,6 +51,20 @@ fn matches_golden_bars_and_profiles() {
     assert_eq!(actual_tick.len(), expected.tick_bars_3.len());
     assert_eq!(serde_json::to_value(actual_tick).unwrap(), serde_json::to_value(expected.tick_bars_3).unwrap());
 
+    let actual_volume = build_non_time_bars_from_ticks(&ticks, "NQH6", "volume", 5, 0.25, New_York).unwrap();
+    assert_eq!(actual_volume.len(), expected.volume_bars_5.len());
+    assert_eq!(
+        serde_json::to_value(actual_volume).unwrap(),
+        serde_json::to_value(expected.volume_bars_5).unwrap()
+    );
+
+    let actual_range = build_non_time_bars_from_ticks(&ticks, "NQH6", "range", 2, 0.25, New_York).unwrap();
+    assert_eq!(actual_range.len(), expected.range_bars_2.len());
+    assert_eq!(
+        serde_json::to_value(actual_range).unwrap(),
+        serde_json::to_value(expected.range_bars_2).unwrap()
+    );
+
     let profiles = build_profiles_for_ticks("NQH6", &ticks, New_York, 0.25);
     assert_eq!(profiles.len(), expected.profile_count);
 
@@ -85,7 +101,14 @@ fn matches_golden_bars_and_profiles() {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(actual_levels.len(), expected_profile.levels.len());
+        assert_eq!(
+            actual_levels.len(),
+            expected_profile.levels.len(),
+            "level count mismatch for {} {}: actual={actual_levels:?} expected={:?}",
+            expected_profile.preset,
+            expected_profile.metric,
+            expected_profile.levels
+        );
         for (actual_level, expected_level) in actual_levels.iter().zip(expected_profile.levels.iter()) {
             assert_close(actual_level.price_level, expected_level.price_level);
             assert_close(actual_level.value, expected_level.value);

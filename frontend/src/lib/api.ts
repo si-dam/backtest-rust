@@ -55,6 +55,14 @@ export interface Profile {
   levels: ProfileLevel[];
 }
 
+export interface AreaProfileResponse {
+  symbol_contract: string;
+  timezone: string;
+  metric: string;
+  tick_aggregation: number;
+  profile: Profile;
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`);
   if (!response.ok) {
@@ -110,4 +118,8 @@ export function getPresetProfiles(symbolContract: string, params: URLSearchParam
     tick_aggregation: number;
     profiles: Profile[];
   }>(`/markets/${symbolContract}/profiles/preset?${params.toString()}`);
+}
+
+export function getAreaProfile(symbolContract: string, params: URLSearchParams) {
+  return fetchJson<AreaProfileResponse>(`/markets/${symbolContract}/profiles/area?${params.toString()}`);
 }

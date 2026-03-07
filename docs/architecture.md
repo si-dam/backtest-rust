@@ -24,7 +24,7 @@
 ## Current vertical
 
 - `POST /api/v1/ingestion/jobs` accepts a server-local file path and enqueues ingest work in Postgres.
-- `runtime-worker` parses supported CSV inputs, persists canonical ticks or 1m bars, records ingest metadata, and enqueues derived jobs.
+- `runtime-worker` parses supported `.csv` and tab-delimited `.txt` inputs, persists canonical ticks or 1m bars, records ingest metadata, and enqueues derived jobs.
 - Derived jobs materialize:
   - time bars into `bars_time`
   - non-time bars into `bars_non_time`
@@ -36,5 +36,5 @@
 - The frontend currently exercises three workflows:
   - submit an ingest job and poll `/api/v1/jobs/:job_id`
   - read persisted bars for charting
-  - read persisted preset profiles with client-side filter controls
-- `crates/market/tests/fixtures/` contains the first golden dataset used to lock down bar/profile derivation behavior during the rewrite.
+  - read persisted preset profiles and ad hoc area profiles with client-side filter controls
+- `crates/market/tests/fixtures/` contains the first golden dataset used to lock down bar/profile derivation behavior during the rewrite, including non-time bar variants and week/RTH/ETH profile cases.
