@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 app-core.workspace = true
+backtest.workspace = true
 jobs.workspace = true
 market.workspace = true
 serde_json.workspace = true

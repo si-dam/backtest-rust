@@ -39,9 +39,14 @@
   - operators can inspect recent jobs with `GET /api/v1/jobs`
   - operators can clone a failed/dead-letter job with `POST /api/v1/jobs/:job_id/replay`
   - operators can queue derived rebuild jobs with `POST /api/v1/markets/:symbol/rebuild/jobs`
+- The first strategy path now exists in Rust:
+  - `POST /api/v1/backtests/jobs` can queue `orb_breakout_v1`
+  - `runtime-worker` loads persisted time bars from ClickHouse and runs the ORB engine in `crates/backtest`
+  - run metadata and trades persist to Postgres and are exposed through `/api/v1/backtests/runs/*`
 - The frontend currently exercises three workflows:
   - submit an ingest job and poll `/api/v1/jobs/:job_id`
   - inspect, replay, and rebuild jobs through the control-plane UI
   - read persisted bars for charting
   - read persisted preset profiles and ad hoc area profiles with client-side filter controls
+  - submit and inspect ORB backtest runs
 - `crates/market/tests/fixtures/` contains the first golden dataset used to lock down bar/profile derivation behavior during the rewrite, including non-time bar variants and week/RTH/ETH profile cases.

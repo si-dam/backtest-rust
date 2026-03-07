@@ -1,10 +1,14 @@
 use anyhow::Result;
 use app_core::{config::Settings, telemetry::init_tracing};
+use backtest::{
+    build_trade_records, merge_orb_params, simulate_orb_breakout_strategy, summarize_breakout_trades, NewRunInput,
+    OrbRunSummary, PgBacktestStore, StrategyBar,
+};
 use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
 use market::{
     build_non_time_bars_from_ticks, build_profiles_for_ticks, build_time_bars_from_ticks, derive_symbol_root,
-    detect_tick_size, parse_market_data_file, sha256_hex, summarize_parsed_data, CanonicalTick, CanonicalTickRow,
-    ClickHouseMarketStore, ParsedMarketData, TicksQuery,
+    detect_tick_size, parse_market_data_file, sha256_hex, summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick,
+    CanonicalTickRow, ClickHouseMarketStore, ParsedMarketData, TicksQuery,
 };
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
@@ -20,8 +24,9 @@ async fn main() -> Result<()> {
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect_lazy(&settings.database_url)?;
-    let jobs = PgJobStore::new(pool);
+    let jobs = PgJobStore::new(pool.clone());
     let market = ClickHouseMarketStore::new(&settings.clickhouse_url, &settings.clickhouse_database);
+    let backtests = PgBacktestStore::new(pool);
     let worker_id = format!("runtime-worker-{}", std::process::id());
     let poll_interval = Duration::from_millis(settings.worker_poll_interval_ms);
 
@@ -40,7 +45,17 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
-            let result = dispatch_job(&settings, &jobs, &market, job.id, &worker_id, &job.job_type, &job.payload_json).await;
+            let result = dispatch_job(
+                &settings,
+                &jobs,
+                &market,
+                &backtests,
+                job.id,
+                &worker_id,
+                &job.job_type,
+                &job.payload_json,
+            )
+            .await;
             match result {
                 Ok(summary) => jobs.complete_job(job.id, summary).await?,
                 Err(error) => jobs.fail_job(job.id, &error).await?,
@@ -56,6 +71,7 @@ async fn dispatch_job(
     settings: &Settings,
     jobs: &PgJobStore,
     market: &ClickHouseMarketStore,
+    backtests: &PgBacktestStore,
     job_id: Uuid,
     worker_id: &str,
     job_type: &str,
@@ -65,7 +81,7 @@ async fn dispatch_job(
         "ingestion" => handle_ingestion(settings, jobs, market, job_id, worker_id, payload).await,
         "build_bars" => handle_build_bars(settings, jobs, market, job_id, worker_id, payload).await,
         "build_profiles" => handle_build_profiles(settings, jobs, market, job_id, worker_id, payload).await,
-        "backtest_run" => Err(format!("backtest worker not implemented yet: {payload}")),
+        "backtest_run" => handle_backtest_run(settings, jobs, market, backtests, job_id, worker_id, payload).await,
         "dataset_export" => Ok(json!({ "status": "queued_for_export_implementation", "payload": payload })),
         other => Err(format!("unknown job type: {other}")),
     }
@@ -373,6 +389,137 @@ async fn handle_build_profiles(
     }))
 }
 
+async fn handle_backtest_run(
+    settings: &Settings,
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    backtests: &PgBacktestStore,
+    job_id: Uuid,
+    worker_id: &str,
+    payload: &Value,
+) -> std::result::Result<Value, String> {
+    let name = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("ORB Backtest")
+        .to_string();
+    let strategy_id = payload
+        .get("strategy_id")
+        .and_then(Value::as_str)
+        .unwrap_or("scaffold");
+    if strategy_id != "orb_breakout_v1" {
+        return Err(format!("unsupported strategy_id: {strategy_id}"));
+    }
+
+    let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
+    let orb_params = merge_orb_params(&params, settings.dataset_timezone)
+        .map_err(|error| format!("invalid ORB params: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "creating_backtest_run",
+        json!({ "strategy_id": strategy_id, "symbol_contract": orb_params.symbol_contract }),
+    )
+    .await?;
+    let run = backtests
+        .create_run(NewRunInput {
+            job_id: Some(job_id),
+            strategy_id: strategy_id.to_string(),
+            name,
+            params_json: json!(orb_params),
+        })
+        .await
+        .map_err(|error| format!("failed to create backtest run: {error}"))?;
+
+    let result = run_orb_backtest(settings, jobs, market, backtests, job_id, worker_id, run.id, orb_params).await;
+    if let Err(error) = &result {
+        backtests
+            .fail_run(run.id, error)
+            .await
+            .map_err(|store_error| format!("failed to mark backtest run as failed: {store_error}"))?;
+    }
+    result
+}
+
+async fn run_orb_backtest(
+    settings: &Settings,
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    backtests: &PgBacktestStore,
+    job_id: Uuid,
+    worker_id: &str,
+    run_id: Uuid,
+    params: backtest::OrbStrategyParams,
+) -> std::result::Result<Value, String> {
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "loading_backtest_bars",
+        json!({
+            "run_id": run_id,
+            "symbol_contract": params.symbol_contract,
+            "timeframe": params.timeframe,
+            "start": params.start,
+            "end": params.end,
+        }),
+    )
+    .await?;
+    let bars = market
+        .load_bars(
+            &params.symbol_contract,
+            &BarsQuery {
+                start: params.start,
+                end: params.end,
+                timeframe: params.timeframe.clone(),
+                bar_type: "time".to_string(),
+                bar_size: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("failed to load backtest bars: {error}"))?;
+    let strategy_bars = bars_to_strategy_bars(&bars);
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "simulating_strategy",
+        json!({ "run_id": run_id, "bar_count": strategy_bars.len(), "timezone": settings.dataset_timezone.name() }),
+    )
+    .await?;
+    let trades = simulate_orb_breakout_strategy(&strategy_bars, &params)
+        .map_err(|error| format!("failed to simulate ORB breakout: {error}"))?;
+    let metrics = summarize_breakout_trades(&trades);
+    let trade_records = build_trade_records(run_id, &params, &trades);
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "persisting_backtest_results",
+        json!({ "run_id": run_id, "trade_count": trades.len() }),
+    )
+    .await?;
+    backtests
+        .insert_trades(run_id, &trade_records)
+        .await
+        .map_err(|error| format!("failed to insert backtest trades: {error}"))?;
+    backtests
+        .complete_run(run_id, metrics.clone())
+        .await
+        .map_err(|error| format!("failed to complete backtest run: {error}"))?;
+
+    Ok(json!(OrbRunSummary {
+        strategy_id: "orb_breakout_v1".to_string(),
+        run_id,
+        trade_count: trades.len(),
+        metrics,
+    }))
+}
+
 async fn update_stage(
     jobs: &PgJobStore,
     job_id: Uuid,
@@ -406,6 +553,19 @@ fn tick_rows_to_canonical(rows: &[market::TickRecord]) -> Vec<CanonicalTick> {
             bid_price: row.bid_price,
             ask_price: row.ask_price,
             source_file: None,
+        })
+        .collect()
+}
+
+fn bars_to_strategy_bars(rows: &[BarRecord]) -> Vec<StrategyBar> {
+    rows.iter()
+        .map(|row| StrategyBar {
+            ts: row.ts,
+            open: row.open,
+            high: row.high,
+            low: row.low,
+            close: row.close,
+            volume: row.volume,
         })
         .collect()
 }

@@ -138,6 +138,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "chrono-tz",
  "serde",
  "serde_json",
  "sqlx",
@@ -1448,6 +1449,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "app-core",
+ "backtest",
  "jobs",
  "market",
  "serde_json",

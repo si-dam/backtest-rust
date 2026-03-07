@@ -73,6 +73,41 @@ export interface AreaProfileResponse {
   profile: Profile;
 }
 
+export interface BacktestRunRecord {
+  id: string;
+  job_id: string | null;
+  strategy_id: string;
+  name: string;
+  status: string;
+  params_json: Record<string, unknown>;
+  metrics_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BacktestTradeRecord {
+  id: string;
+  run_id: string;
+  symbol_contract: string;
+  entry_ts: string | null;
+  exit_ts: string | null;
+  entry_price: number | null;
+  exit_price: number | null;
+  qty: number | null;
+  pnl: number | null;
+  notes_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface BacktestAnalytics {
+  trades: number;
+  wins: number;
+  losses: number;
+  total_pnl: number;
+  avg_pnl: number;
+  max_drawdown: number;
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`);
   if (!response.ok) {
@@ -126,6 +161,14 @@ export function createIngestionJob(payload: {
   return postJson<typeof payload, { job_id: string }>("/ingestion/jobs", payload);
 }
 
+export function createBacktestJob(payload: {
+  name: string;
+  strategy_id: string;
+  params: Record<string, unknown>;
+}) {
+  return postJson<typeof payload, { job_id: string }>("/backtests/jobs", payload);
+}
+
 export function getBars(symbolContract: string, params: URLSearchParams) {
   return fetchJson<{ symbol_contract: string; bars: BarRecord[] }>(`/markets/${symbolContract}/bars?${params.toString()}`);
 }
@@ -143,6 +186,18 @@ export function getPresetProfiles(symbolContract: string, params: URLSearchParam
 
 export function getAreaProfile(symbolContract: string, params: URLSearchParams) {
   return fetchJson<AreaProfileResponse>(`/markets/${symbolContract}/profiles/area?${params.toString()}`);
+}
+
+export function getBacktestRuns() {
+  return fetchJson<{ runs: BacktestRunRecord[] }>("/backtests/runs");
+}
+
+export function getBacktestRunTrades(runId: string) {
+  return fetchJson<{ run_id: string; trades: BacktestTradeRecord[] }>(`/backtests/runs/${runId}/trades`);
+}
+
+export function getBacktestRunAnalytics(runId: string) {
+  return fetchJson<{ run_id: string; analytics: BacktestAnalytics }>(`/backtests/runs/${runId}/analytics`);
 }
 
 export function createMarketRebuildJobs(

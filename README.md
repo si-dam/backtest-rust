@@ -60,6 +60,11 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - inspect/replay jobs
   - queue rebuilds
   - read market bars, preset profiles, and area profiles
+- the first Rust backtest path now exists for `orb_breakout_v1`:
+  - the worker loads persisted time bars from ClickHouse
+  - ORB simulation runs in `crates/backtest`
+  - runs and trades persist in Postgres
+  - the frontend can submit and inspect ORB runs
 - fixture-based golden tests now lock down time, tick, volume, and range bars plus multi-preset profile behavior in `crates/market/tests/`
 
-The remaining work is to harden the persistence/query behavior, add dataset export and backtest execution, and validate parity against the imported Python reference app.
+The remaining work is to deepen backtest parity, add dataset export, and validate more of the rewrite against the imported Python reference app.
