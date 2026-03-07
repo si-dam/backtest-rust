@@ -169,6 +169,13 @@ export function createBacktestJob(payload: {
   return postJson<typeof payload, { job_id: string }>("/backtests/jobs", payload);
 }
 
+export function createDatasetJob(payload: {
+  export_kind: "bars" | "ticks" | "backtest_trades";
+  payload: Record<string, unknown>;
+}) {
+  return postJson<typeof payload, { job_id: string }>("/datasets/jobs", payload);
+}
+
 export function getBars(symbolContract: string, params: URLSearchParams) {
   return fetchJson<{ symbol_contract: string; bars: BarRecord[] }>(`/markets/${symbolContract}/bars?${params.toString()}`);
 }
