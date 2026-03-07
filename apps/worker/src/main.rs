@@ -355,6 +355,13 @@ async fn handle_build_bars(
         .get("tick_size")
         .and_then(Value::as_f64)
         .unwrap_or(0.25);
+    let large_order_threshold = payload
+        .get("large_orders_threshold")
+        .and_then(Value::as_f64)
+        .unwrap_or(25.0);
+    if large_order_threshold <= 0.0 {
+        return Err("large_orders_threshold must be greater than 0".to_string());
+    }
 
     update_stage(
         jobs,
@@ -426,7 +433,6 @@ async fn handle_build_bars(
             .push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
     }
 
-    let large_order_threshold = 25.0_f64;
     update_stage(
         jobs,
         job_id,

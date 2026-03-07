@@ -55,6 +55,7 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - failed or dead-letter jobs can be replayed through `/api/v1/jobs/:job_id/replay`
   - derived bars/profiles can be rebuilt by symbol and date range through `/api/v1/markets/:symbol/rebuild/jobs`
 - the market crate can build time bars, non-time bars, and persisted base profile levels for both volume and delta profiles
+- fixed-threshold large orders are also persisted during bar rebuilds, and the rebuild controls can override the threshold used for those rows
 - the frontend can now operate the control plane as well as the market views:
   - ingest files
   - inspect/replay jobs

@@ -23,6 +23,7 @@ export default function JobsPanel({ selectedSymbol }: JobsPanelProps) {
   const [jobTypeFilter, setJobTypeFilter] = useState("all");
   const [rebuildTarget, setRebuildTarget] = useState<"bars" | "profiles" | "all">("all");
   const [lookbackDays, setLookbackDays] = useState("5");
+  const [largeOrdersThreshold, setLargeOrdersThreshold] = useState("25");
   const [profileTimezone, setProfileTimezone] = useState("America/New_York");
 
   const jobsQuery = useQuery({
@@ -45,6 +46,7 @@ export default function JobsPanel({ selectedSymbol }: JobsPanelProps) {
       return createMarketRebuildJobs(selectedSymbol, {
         start: start.toISOString(),
         end: end.toISOString(),
+        large_orders_threshold: Number(largeOrdersThreshold),
         profile_timezone: profileTimezone,
         target: rebuildTarget,
       });
@@ -137,6 +139,14 @@ export default function JobsPanel({ selectedSymbol }: JobsPanelProps) {
                 <option value="America/Chicago">America/Chicago</option>
                 <option value="UTC">UTC</option>
               </select>
+            </label>
+            <label className="field">
+              <span className="field-label">Large order threshold</span>
+              <input
+                className="field-input"
+                value={largeOrdersThreshold}
+                onChange={(event) => setLargeOrdersThreshold(event.target.value)}
+              />
             </label>
           </div>
           <button

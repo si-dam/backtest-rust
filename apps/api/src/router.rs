@@ -59,6 +59,7 @@ struct RebuildMarketRequest {
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
     tick_size: Option<f64>,
+    large_orders_threshold: Option<f64>,
     profile_timezone: Option<String>,
     #[serde(default = "default_rebuild_target")]
     target: String,
@@ -224,6 +225,10 @@ async fn create_market_rebuild_jobs(
     }
 
     let tick_size = payload.tick_size.unwrap_or_else(|| market::detect_tick_size(&symbol));
+    let large_orders_threshold = payload.large_orders_threshold.unwrap_or(25.0);
+    if large_orders_threshold <= 0.0 {
+        return Err(ApiError::bad_request("large_orders_threshold must be greater than 0"));
+    }
     let profile_timezone = payload.profile_timezone.unwrap_or_else(|| state.settings.dataset_timezone.name().to_string());
     if payload.target != "bars" {
         profile_timezone
@@ -242,6 +247,7 @@ async fn create_market_rebuild_jobs(
                     "start": payload.start,
                     "end": payload.end,
                     "tick_size": tick_size,
+                    "large_orders_threshold": large_orders_threshold,
                     "rebuild": true,
                 }),
                 max_attempts: 3,
@@ -277,6 +283,7 @@ async fn create_market_rebuild_jobs(
             "symbol_contract": symbol,
             "start": payload.start,
             "end": payload.end,
+            "large_orders_threshold": large_orders_threshold,
             "jobs": submitted,
         })),
     ))

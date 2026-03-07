@@ -24,6 +24,7 @@ export interface RebuildJobResponse {
   symbol_contract: string;
   start: string;
   end: string;
+  large_orders_threshold?: number;
   jobs: Array<{
     job_id: string;
     job_type: string;
@@ -249,6 +250,7 @@ export function createMarketRebuildJobs(
     start: string;
     end: string;
     tick_size?: number;
+    large_orders_threshold?: number;
     profile_timezone?: string;
     target?: "bars" | "profiles" | "all";
   },

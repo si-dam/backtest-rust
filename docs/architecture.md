@@ -29,6 +29,7 @@
   - time bars into `bars_time`
   - non-time bars into `bars_non_time`
   - persisted preset profile segments and base levels into `profile_segments` and `profile_levels_base`
+  - fixed-threshold large orders into `large_orders`
 - Rebuild semantics are now explicit:
   - the same source path and hash is treated as a no-op unless `rebuild=true`
   - rebuilds clear and replace affected bars/profiles in-range instead of appending duplicates
@@ -53,6 +54,7 @@
   - submit an ingest job and poll `/api/v1/jobs/:job_id`
   - inspect, replay, and rebuild jobs through the control-plane UI
   - read persisted bars for charting
+  - read persisted fixed-threshold large-order rows
   - read persisted preset profiles and ad hoc area profiles with client-side filter controls
   - submit and inspect ORB backtest runs
 - `crates/market/tests/fixtures/` contains the first golden dataset used to lock down bar/profile derivation behavior during the rewrite, including non-time bar variants and week/RTH/ETH profile cases.
