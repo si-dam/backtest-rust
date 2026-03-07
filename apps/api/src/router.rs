@@ -45,6 +45,7 @@ struct DatasetJobRequest {
 #[derive(Debug, Deserialize)]
 struct DatasetExportsQuery {
     export_kind: Option<String>,
+    job_id: Option<Uuid>,
     limit: Option<i64>,
 }
 
@@ -433,6 +434,7 @@ async fn list_dataset_exports(
         .jobs
         .list_dataset_exports(ListDatasetExportsInput {
             export_kind: query.export_kind.as_deref(),
+            job_id: query.job_id,
             limit: query.limit.unwrap_or(50),
         })
         .await

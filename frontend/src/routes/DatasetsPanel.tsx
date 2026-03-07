@@ -78,6 +78,22 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
     refetchInterval: 4000,
   });
 
+  const latestExportQuery = useQuery({
+    queryKey: ["dataset-export-by-job", exportKind, activeJobId],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set("limit", "1");
+      params.set("export_kind", exportKind);
+      params.set("job_id", activeJobId!);
+      return getDatasetExports(params);
+    },
+    enabled: Boolean(activeJobId),
+    refetchInterval: (query) => {
+      const hasExport = (query.state.data?.exports.length ?? 0) > 0;
+      return hasExport ? false : 2000;
+    },
+  });
+
   const jobQuery = useQuery({
     queryKey: ["dataset-job", activeJobId],
     queryFn: () => getJob(activeJobId!),
@@ -252,6 +268,34 @@ export default function DatasetsPanel({ selectedSymbol }: DatasetsPanelProps) {
                 {JSON.stringify(jobQuery.data.error_json, null, 2)}
               </pre>
             ) : null}
+          </div>
+        ) : null}
+      </article>
+
+      <article className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Persisted export</p>
+            <h2>{activeJobId ?? "No job yet"}</h2>
+          </div>
+          <span className="pill">
+            {latestExportQuery.data?.exports.length ? "recorded" : activeJobId ? "waiting" : "idle"}
+          </span>
+        </div>
+        {!activeJobId ? <p>Queue an export job to look up its persisted export record.</p> : null}
+        {latestExportQuery.isLoading ? <p>Checking for recorded export…</p> : null}
+        {latestExportQuery.isError ? <p className="error-copy">{latestExportQuery.error.message}</p> : null}
+        {latestExportQuery.data?.exports[0] ? (
+          <div className="job-card">
+            <div className="profile-header">
+              <strong>{latestExportQuery.data.exports[0].export_kind}</strong>
+              <span>{latestExportQuery.data.exports[0].schema_version}</span>
+            </div>
+            <p className="microcopy">{summarizeExport(latestExportQuery.data.exports[0].payload_json)}</p>
+            <p className="microcopy">{latestExportQuery.data.exports[0].manifest_path}</p>
+            <pre className="json-card compact-card">
+              {JSON.stringify(latestExportQuery.data.exports[0].payload_json, null, 2)}
+            </pre>
           </div>
         ) : null}
       </article>

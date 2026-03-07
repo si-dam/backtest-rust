@@ -110,6 +110,7 @@ pub struct ListJobsInput<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct ListDatasetExportsInput<'a> {
     pub export_kind: Option<&'a str>,
+    pub job_id: Option<Uuid>,
     pub limit: i64,
 }
 
@@ -300,11 +301,13 @@ impl PgJobStore {
             SELECT id, job_id, export_kind, manifest_path, schema_version, payload_json, created_at
             FROM dataset_exports
             WHERE ($1::text IS NULL OR export_kind = $1)
+              AND ($2::uuid IS NULL OR job_id = $2)
             ORDER BY created_at DESC
-            LIMIT $2
+            LIMIT $3
             "#,
         )
         .bind(input.export_kind)
+        .bind(input.job_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
