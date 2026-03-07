@@ -106,6 +106,9 @@ async fn create_ingestion_job(
     if !normalized.starts_with(&root) {
         return Err(ApiError::bad_request("file_path must stay inside the ingest root"));
     }
+    if !normalized.exists() {
+        return Err(ApiError::not_found("requested ingest file does not exist"));
+    }
 
     let job = state
         .jobs

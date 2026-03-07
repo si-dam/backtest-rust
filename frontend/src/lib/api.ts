@@ -4,6 +4,22 @@ export interface SymbolRecord {
   symbol_contract: string;
 }
 
+export interface JobRecord {
+  id: string;
+  job_type: string;
+  status: string;
+  payload_json: Record<string, unknown>;
+  result_json: Record<string, unknown>;
+  error_json: Record<string, unknown>;
+  progress_json: Record<string, unknown>;
+  attempt: number;
+  max_attempts: number;
+  lease_until: string | null;
+  locked_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface BarRecord {
   ts: string;
   session_date: string;
@@ -48,15 +64,44 @@ async function fetchJson<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function postJson<TRequest, TResponse>(path: string, payload: TRequest): Promise<TResponse> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `request failed: ${response.status}`);
+  }
+
+  return (await response.json()) as TResponse;
+}
+
 export function getSymbols() {
   return fetchJson<{ symbols: SymbolRecord[] }>("/symbols");
 }
 
-export function getBars(params: URLSearchParams) {
-  return fetchJson<{ symbol_contract: string; bars: BarRecord[] }>(`/markets/${params.get("symbol_contract")}/bars?${params.toString()}`);
+export function getJob(jobId: string) {
+  return fetchJson<JobRecord>(`/jobs/${jobId}`);
 }
 
-export function getPresetProfiles(params: URLSearchParams) {
+export function createIngestionJob(payload: {
+  file_path: string;
+  symbol_contract?: string;
+  rebuild?: boolean;
+}) {
+  return postJson<typeof payload, { job_id: string }>("/ingestion/jobs", payload);
+}
+
+export function getBars(symbolContract: string, params: URLSearchParams) {
+  return fetchJson<{ symbol_contract: string; bars: BarRecord[] }>(`/markets/${symbolContract}/bars?${params.toString()}`);
+}
+
+export function getPresetProfiles(symbolContract: string, params: URLSearchParams) {
   return fetchJson<{
     symbol_contract: string;
     timezone: string;
@@ -64,5 +109,5 @@ export function getPresetProfiles(params: URLSearchParams) {
     metric: string;
     tick_aggregation: number;
     profiles: Profile[];
-  }>(`/markets/${params.get("symbol_contract")}/profiles/preset?${params.toString()}`);
+  }>(`/markets/${symbolContract}/profiles/preset?${params.toString()}`);
 }

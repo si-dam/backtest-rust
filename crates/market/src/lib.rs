@@ -1,13 +1,21 @@
+mod bars;
+mod ingest;
 mod profiles;
 
 use std::collections::BTreeMap;
 
+use anyhow::Context;
 use app_core::error::ApiError;
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use clickhouse::{error::Error as ClickHouseError, Client, Row};
-use profiles::{build_value_area, bucket_price, classify_side};
+use profiles::{build_preset_profiles, build_value_area, bucket_price, classify_side};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+pub use bars::{build_bar_records, build_non_time_bars_from_ticks, build_time_bars_from_ticks, timeframe_to_seconds};
+pub use ingest::{parse_market_data_file, summarize_parsed_data, ParsedFileSummary, ParsedMarketData};
 
 #[derive(Clone)]
 pub struct ClickHouseMarketStore {
@@ -295,6 +303,92 @@ impl ClickHouseMarketStore {
             .await
             .map_err(map_clickhouse_err)
     }
+
+    pub async fn insert_ticks(&self, rows: &[CanonicalTickRow]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("ticks").context("failed to create tick insert")?;
+        for row in rows {
+            insert.write(row).await.context("failed to write tick row")?;
+        }
+        insert.end().await.context("failed to finalize tick insert")?;
+        Ok(())
+    }
+
+    pub async fn insert_time_bars(&self, rows: &[TimeBarRow]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("bars_time").context("failed to create time bar insert")?;
+        for row in rows {
+            insert.write(row).await.context("failed to write time bar row")?;
+        }
+        insert.end().await.context("failed to finalize time bar insert")?;
+        Ok(())
+    }
+
+    pub async fn insert_non_time_bars(&self, rows: &[NonTimeBarRow]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self
+            .client
+            .insert("bars_non_time")
+            .context("failed to create non-time bar insert")?;
+        for row in rows {
+            insert.write(row).await.context("failed to write non-time bar row")?;
+        }
+        insert.end().await.context("failed to finalize non-time bar insert")?;
+        Ok(())
+    }
+
+    pub async fn replace_profiles_for_symbol(
+        &self,
+        symbol_contract: &str,
+        profile_timezone: &str,
+        profiles: &[PersistedProfile],
+    ) -> anyhow::Result<()> {
+        if profiles.is_empty() {
+            return Ok(());
+        }
+
+        self.client
+            .query(
+                "ALTER TABLE profile_levels_base DELETE WHERE symbol_contract = ? AND segment_id IN (SELECT segment_id FROM profile_segments WHERE symbol_contract = ? AND profile_timezone = ?)",
+            )
+            .bind(symbol_contract)
+            .bind(symbol_contract)
+            .bind(profile_timezone)
+            .execute()
+            .await
+            .context("failed to clear profile levels")?;
+
+        self.client
+            .query("ALTER TABLE profile_segments DELETE WHERE symbol_contract = ? AND profile_timezone = ?")
+            .bind(symbol_contract)
+            .bind(profile_timezone)
+            .execute()
+            .await
+            .context("failed to clear profile segments")?;
+
+        let mut segment_insert = self.client.insert("profile_segments").context("failed to create profile segment insert")?;
+        let mut level_insert = self.client.insert("profile_levels_base").context("failed to create profile level insert")?;
+
+        for profile in profiles {
+            segment_insert
+                .write(&profile.segment)
+                .await
+                .context("failed to write profile segment")?;
+            for level in &profile.levels {
+                level_insert.write(level).await.context("failed to write profile level")?;
+            }
+        }
+
+        segment_insert.end().await.context("failed to finalize profile segment insert")?;
+        level_insert.end().await.context("failed to finalize profile level insert")?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -405,6 +499,81 @@ pub struct TickRecord {
     pub ask_price: Option<f64>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CanonicalTick {
+    pub ts: DateTime<Utc>,
+    pub trading_day: chrono::NaiveDate,
+    pub session_date: chrono::NaiveDate,
+    pub symbol_contract: String,
+    pub trade_price: f64,
+    pub trade_size: f64,
+    pub bid_price: Option<f64>,
+    pub ask_price: Option<f64>,
+    pub source_file: Option<String>,
+}
+
+impl CanonicalTick {
+    pub fn new(
+        ts: DateTime<Utc>,
+        symbol_contract: &str,
+        trade_price: f64,
+        trade_size: f64,
+        bid_price: Option<f64>,
+        ask_price: Option<f64>,
+    ) -> Self {
+        Self {
+            ts,
+            trading_day: ts.date_naive(),
+            session_date: ts.date_naive(),
+            symbol_contract: symbol_contract.to_string(),
+            trade_price,
+            trade_size,
+            bid_price,
+            ask_price,
+            source_file: None,
+        }
+    }
+
+    pub fn with_dataset_timezone(mut self, dataset_timezone: Tz) -> Self {
+        self.session_date = self.ts.with_timezone(&dataset_timezone).date_naive();
+        self
+    }
+
+    pub fn with_source_file(mut self, source_file: impl Into<String>) -> Self {
+        self.source_file = Some(source_file.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Row)]
+pub struct CanonicalTickRow {
+    pub ts: DateTime<Utc>,
+    pub trading_day: chrono::NaiveDate,
+    pub session_date: chrono::NaiveDate,
+    pub symbol_contract: String,
+    pub trade_price: f64,
+    pub trade_size: f64,
+    pub bid_price: Option<f64>,
+    pub ask_price: Option<f64>,
+    pub source_file: String,
+}
+
+impl From<CanonicalTick> for CanonicalTickRow {
+    fn from(value: CanonicalTick) -> Self {
+        Self {
+            ts: value.ts,
+            trading_day: value.trading_day,
+            session_date: value.session_date,
+            symbol_contract: value.symbol_contract,
+            trade_price: value.trade_price,
+            trade_size: value.trade_size,
+            bid_price: value.bid_price,
+            ask_price: value.ask_price,
+            source_file: value.source_file.unwrap_or_else(|| "unknown.csv".to_string()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Row)]
 pub struct BarRecord {
     pub ts: DateTime<Utc>,
@@ -417,6 +586,120 @@ pub struct BarRecord {
     pub close: f64,
     pub volume: f64,
     pub trade_count: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum TradingBarKind {
+    Time(String),
+    NonTime(String, u32),
+}
+
+#[derive(Clone, Debug)]
+pub struct TradingBar {
+    pub ts: DateTime<Utc>,
+    pub trading_day: chrono::NaiveDate,
+    pub session_date: chrono::NaiveDate,
+    pub symbol_contract: String,
+    pub kind: TradingBarKind,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub trade_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Row)]
+pub struct TimeBarRow {
+    pub ts: DateTime<Utc>,
+    pub trading_day: chrono::NaiveDate,
+    pub session_date: chrono::NaiveDate,
+    pub symbol_contract: String,
+    pub timeframe: String,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub trade_count: u64,
+}
+
+impl TimeBarRow {
+    pub fn from_bar(value: TradingBar) -> Self {
+        let timeframe = match value.kind {
+            TradingBarKind::Time(timeframe) => timeframe,
+            TradingBarKind::NonTime(bar_type, bar_size) => format!("{bar_type}:{bar_size}"),
+        };
+        Self {
+            ts: value.ts,
+            trading_day: value.trading_day,
+            session_date: value.session_date,
+            symbol_contract: value.symbol_contract,
+            timeframe,
+            open: value.open,
+            high: value.high,
+            low: value.low,
+            close: value.close,
+            volume: value.volume,
+            trade_count: value.trade_count,
+        }
+    }
+}
+
+impl From<TimeBarRow> for BarRecord {
+    fn from(value: TimeBarRow) -> Self {
+        Self {
+            ts: value.ts,
+            session_date: value.session_date,
+            symbol_contract: value.symbol_contract,
+            timeframe: value.timeframe,
+            open: value.open,
+            high: value.high,
+            low: value.low,
+            close: value.close,
+            volume: value.volume,
+            trade_count: value.trade_count,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Row)]
+pub struct NonTimeBarRow {
+    pub ts: DateTime<Utc>,
+    pub trading_day: chrono::NaiveDate,
+    pub session_date: chrono::NaiveDate,
+    pub symbol_contract: String,
+    pub bar_type: String,
+    pub bar_size: u32,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub trade_count: u64,
+}
+
+impl NonTimeBarRow {
+    pub fn from_bar(value: TradingBar) -> Self {
+        let (bar_type, bar_size) = match value.kind {
+            TradingBarKind::Time(timeframe) => ("time".to_string(), timeframe.parse::<u32>().unwrap_or(0)),
+            TradingBarKind::NonTime(bar_type, bar_size) => (bar_type, bar_size),
+        };
+        Self {
+            ts: value.ts,
+            trading_day: value.trading_day,
+            session_date: value.session_date,
+            symbol_contract: value.symbol_contract,
+            bar_type,
+            bar_size,
+            open: value.open,
+            high: value.high,
+            low: value.low,
+            close: value.close,
+            volume: value.volume,
+            trade_count: value.trade_count,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Row)]
@@ -504,6 +787,12 @@ pub struct ValueAreaSummary {
     pub volume: f64,
 }
 
+#[derive(Clone, Debug)]
+pub struct PersistedProfile {
+    pub segment: ProfileSegmentRow,
+    pub levels: Vec<ProfileLevelBaseRow>,
+}
+
 impl ValueAreaSummary {
     pub fn disabled(percent: f64) -> Self {
         Self {
@@ -565,4 +854,56 @@ fn default_max_segments() -> u32 {
 
 fn map_clickhouse_err(error: ClickHouseError) -> ApiError {
     ApiError::internal(format!("clickhouse query failed: {error}"))
+}
+
+pub fn derive_symbol_root(symbol_contract: &str) -> String {
+    symbol_contract
+        .chars()
+        .take_while(|value| value.is_ascii_alphabetic())
+        .collect::<String>()
+}
+
+pub fn detect_tick_size(symbol_contract: &str) -> f64 {
+    for (prefix, tick_size) in [
+        ("MNQ", 0.25),
+        ("MES", 0.25),
+        ("NQ", 0.25),
+        ("ES", 0.25),
+        ("RTY", 0.1),
+        ("CL", 0.01),
+        ("GC", 0.1),
+    ] {
+        if symbol_contract.starts_with(prefix) {
+            return tick_size;
+        }
+    }
+    0.25
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+pub fn build_profiles_for_ticks(
+    symbol_contract: &str,
+    ticks: &[CanonicalTick],
+    profile_timezone: Tz,
+    tick_size: f64,
+) -> Vec<PersistedProfile> {
+    let mut profiles = Vec::new();
+    for preset in ["day", "week", "rth", "eth"] {
+        profiles.extend(build_preset_profiles(
+            symbol_contract,
+            ticks,
+            preset,
+            "volume",
+            profile_timezone,
+            tick_size,
+            true,
+            70.0,
+        ));
+    }
+    profiles
 }

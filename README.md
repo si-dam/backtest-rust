@@ -40,4 +40,11 @@ This repo does not assume a local Docker stack. Postgres and ClickHouse can be a
 
 ## Current state
 
-This repo now contains the phase-1 foundation plus the first API/frontend scaffold. The Rust toolchain is not installed in this environment, so the Rust side was built manually and could not be compiled here.
+This repo now contains the phase-1 foundation and an in-progress phase-2 market-data slice:
+
+- ingest jobs parse Sierra-style tick and 1m OHLC CSV inputs
+- the worker persists canonical ticks and bars, then enqueues derived bar/profile jobs
+- the market crate can build time bars, non-time bars, and persisted base profile levels
+- the frontend can read the new `/api/v1` market endpoints
+
+The remaining work is to harden the persistence/query behavior, add dataset export and backtest execution, and validate parity against the imported Python reference app.

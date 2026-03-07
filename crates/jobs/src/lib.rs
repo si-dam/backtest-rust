@@ -279,6 +279,68 @@ impl PgJobStore {
         Ok(())
     }
 
+    pub async fn upsert_symbol(
+        &self,
+        symbol_contract: &str,
+        root_symbol: &str,
+        exchange: Option<&str>,
+        tick_size: Option<f64>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO symbols (symbol_contract, root_symbol, exchange, tick_size)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (symbol_contract)
+            DO UPDATE SET
+                root_symbol = EXCLUDED.root_symbol,
+                exchange = EXCLUDED.exchange,
+                tick_size = EXCLUDED.tick_size,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(symbol_contract)
+        .bind(root_symbol)
+        .bind(exchange)
+        .bind(tick_size)
+        .execute(&self.pool)
+        .await
+        .context("failed to upsert symbol")?;
+
+        Ok(())
+    }
+
+    pub async fn record_ingested_file(
+        &self,
+        source_path: &str,
+        source_hash: &str,
+        schema_kind: &str,
+        symbol_contract: Option<&str>,
+        row_count: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO ingested_files (source_path, source_hash, schema_kind, symbol_contract, row_count)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (source_path)
+            DO UPDATE SET
+                source_hash = EXCLUDED.source_hash,
+                schema_kind = EXCLUDED.schema_kind,
+                symbol_contract = EXCLUDED.symbol_contract,
+                row_count = EXCLUDED.row_count
+            "#,
+        )
+        .bind(source_path)
+        .bind(source_hash)
+        .bind(schema_kind)
+        .bind(symbol_contract)
+        .bind(row_count)
+        .execute(&self.pool)
+        .await
+        .context("failed to record ingested file")?;
+
+        Ok(())
+    }
+
     async fn record_attempt(
         &self,
         job_id: Uuid,
