@@ -14,7 +14,7 @@ use backtest::{
 use chrono::{DateTime, Utc};
 use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
 use market::{
-    build_non_time_bars_from_ticks, build_profiles_for_ticks, build_time_bars_from_ticks,
+    build_large_orders_from_ticks, build_non_time_bars_from_ticks, build_profiles_for_ticks, build_time_bars_from_ticks,
     derive_symbol_root, detect_tick_size, parse_market_data_file, sha256_hex,
     summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick, CanonicalTickRow,
     ClickHouseMarketStore, ParsedMarketData, TicksQuery,
@@ -426,11 +426,43 @@ async fn handle_build_bars(
             .push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
     }
 
+    let large_order_threshold = 25.0_f64;
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "building_large_orders",
+        json!({
+            "symbol_contract": symbol_contract,
+            "method": "fixed",
+            "fixed_threshold": large_order_threshold,
+        }),
+    )
+    .await?;
+    let large_orders =
+        build_large_orders_from_ticks(symbol_contract, &ticks, "fixed", large_order_threshold);
+    market
+        .replace_large_orders(
+            symbol_contract,
+            "fixed",
+            large_order_threshold,
+            start,
+            end,
+            &large_orders,
+        )
+        .await
+        .map_err(|error| format!("failed to replace fixed large orders: {error}"))?;
+
     Ok(json!({
         "status": "bars_built",
         "symbol_contract": symbol_contract,
         "time_bars": inserted_timeframes,
         "non_time_bars": inserted_non_time,
+        "large_orders": {
+            "method": "fixed",
+            "threshold": large_order_threshold,
+            "rows": large_orders.len(),
+        },
     }))
 }
 

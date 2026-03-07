@@ -13,7 +13,7 @@ use axum::{
 };
 use backtest::{BacktestJobRequest, PgBacktestStore};
 use jobs::{CreateJobInput, JobSubmitted, JobType, ListDatasetExportsInput, ListJobsInput, PgJobStore};
-use market::{AreaProfileQuery, BarsQuery, ClickHouseMarketStore, PresetProfileQuery, TicksQuery};
+use market::{AreaProfileQuery, BarsQuery, ClickHouseMarketStore, LargeOrdersQuery, PresetProfileQuery, TicksQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
@@ -98,6 +98,7 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
         .route("/markets/:symbol/rebuild/jobs", post(create_market_rebuild_jobs))
         .route("/markets/:symbol/ticks", get(get_ticks))
         .route("/markets/:symbol/bars", get(get_bars))
+        .route("/markets/:symbol/large-orders", get(get_large_orders))
         .route("/markets/:symbol/profiles/preset", get(get_preset_profiles))
         .route("/markets/:symbol/profiles/area", get(get_area_profile))
         .route("/backtests/jobs", post(create_backtest_job))
@@ -303,6 +304,16 @@ async fn get_bars(
     query.validate()?;
     let bars = state.market.load_bars(&symbol, &query).await?;
     Ok(Json(json!({ "symbol_contract": symbol, "bars": bars })))
+}
+
+async fn get_large_orders(
+    State(state): State<AppState>,
+    Path(symbol): Path<String>,
+    Query(query): Query<LargeOrdersQuery>,
+) -> ApiResult<Json<Value>> {
+    query.validate()?;
+    let large_orders = state.market.load_large_orders(&symbol, &query).await?;
+    Ok(Json(json!({ "symbol_contract": symbol, "large_orders": large_orders })))
 }
 
 async fn get_preset_profiles(

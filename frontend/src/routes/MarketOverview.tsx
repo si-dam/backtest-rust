@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ChartCard from "../components/ChartCard";
-import { getBars } from "../lib/api";
+import { getBars, getLargeOrders } from "../lib/api";
 
 function buildBarsParams(lookbackHours: number, barType: string, timeframe: string, barSize: string) {
   const end = new Date();
@@ -24,11 +24,23 @@ interface MarketOverviewProps {
   selectedSymbol: string;
 }
 
+function buildLargeOrdersParams(lookbackHours: number, fixedThreshold: string) {
+  const end = new Date();
+  const start = new Date(end.getTime() - 1000 * 60 * 60 * lookbackHours);
+  return new URLSearchParams({
+    start: start.toISOString(),
+    end: end.toISOString(),
+    method: "fixed",
+    fixed_threshold: fixedThreshold,
+  });
+}
+
 export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) {
   const [lookbackHours, setLookbackHours] = useState("24");
   const [barType, setBarType] = useState("time");
   const [timeframe, setTimeframe] = useState("1m");
   const [barSize, setBarSize] = useState("1500");
+  const [largeOrderThreshold, setLargeOrderThreshold] = useState("25");
 
   const barsQuery = useQuery({
     queryKey: ["bars", selectedSymbol, lookbackHours, barType, timeframe, barSize],
@@ -36,6 +48,16 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
       getBars(
         selectedSymbol,
         buildBarsParams(Number(lookbackHours), barType, timeframe, barSize),
+      ),
+    enabled: Boolean(selectedSymbol),
+  });
+
+  const largeOrdersQuery = useQuery({
+    queryKey: ["large-orders", selectedSymbol, lookbackHours, largeOrderThreshold],
+    queryFn: () =>
+      getLargeOrders(
+        selectedSymbol,
+        buildLargeOrdersParams(Number(lookbackHours), largeOrderThreshold),
       ),
     enabled: Boolean(selectedSymbol),
   });
@@ -115,9 +137,18 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
               </select>
             </label>
           )}
+
+          <label className="field">
+            <span className="field-label">Large order threshold</span>
+            <input
+              className="field-input"
+              value={largeOrderThreshold}
+              onChange={(event) => setLargeOrderThreshold(event.target.value)}
+            />
+          </label>
         </div>
         <p className="microcopy">
-          Bars are loaded from persisted `bars_time` or `bars_non_time`, not built on the request path.
+          Bars and fixed-threshold large orders are loaded from persisted ClickHouse tables, not built on the request path.
         </p>
       </article>
 
@@ -142,6 +173,10 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
             <strong>Series</strong>
             <span>{barType === "time" ? timeframe : `${barType}:${barSize}`}</span>
           </div>
+          <div className="list-row">
+            <strong>Large orders</strong>
+            <span>{largeOrdersQuery.data?.large_orders.length ?? 0} rows</span>
+          </div>
         </div>
       </article>
 
@@ -157,6 +192,31 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
         {barsQuery.isError ? <p>Unable to load bars from the Rust API.</p> : null}
         {barsQuery.isLoading ? <p>Loading bars…</p> : null}
         {barsQuery.data?.bars.length ? <ChartCard bars={barsQuery.data.bars} /> : null}
+      </article>
+
+      <article className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Large orders</p>
+            <h2>Fixed threshold overlay rows</h2>
+          </div>
+          <span className="pill">{largeOrderThreshold}</span>
+        </div>
+        {largeOrdersQuery.isError ? <p>Unable to load large orders from the Rust API.</p> : null}
+        {largeOrdersQuery.isLoading ? <p>Loading large orders…</p> : null}
+        <div className="stack">
+          {largeOrdersQuery.data?.large_orders.slice(0, 8).map((row) => (
+            <div className="job-card" key={`${row.ts}-${row.trade_price}-${row.trade_size}`}>
+              <div className="profile-header">
+                <strong>{row.side}</strong>
+                <span>{row.trade_size.toFixed(2)}</span>
+              </div>
+              <p className="microcopy">
+                {new Date(row.ts).toLocaleString()} • {row.trade_price.toFixed(2)}
+              </p>
+            </div>
+          ))}
+        </div>
       </article>
     </section>
   );

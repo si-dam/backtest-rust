@@ -43,6 +43,17 @@ export interface BarRecord {
   trade_count: number;
 }
 
+export interface LargeOrderRecord {
+  ts: string;
+  session_date: string;
+  symbol_contract: string;
+  method: string;
+  threshold: number;
+  trade_price: number;
+  trade_size: number;
+  side: string;
+}
+
 export interface ProfileLevel {
   price_level: number;
   value: number;
@@ -193,6 +204,12 @@ export function getDatasetExports(params?: URLSearchParams) {
 
 export function getBars(symbolContract: string, params: URLSearchParams) {
   return fetchJson<{ symbol_contract: string; bars: BarRecord[] }>(`/markets/${symbolContract}/bars?${params.toString()}`);
+}
+
+export function getLargeOrders(symbolContract: string, params: URLSearchParams) {
+  return fetchJson<{ symbol_contract: string; large_orders: LargeOrderRecord[] }>(
+    `/markets/${symbolContract}/large-orders?${params.toString()}`,
+  );
 }
 
 export function getPresetProfiles(symbolContract: string, params: URLSearchParams) {

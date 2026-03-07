@@ -119,6 +119,34 @@ impl ClickHouseMarketStore {
             .map_err(map_clickhouse_err)
     }
 
+    pub async fn load_large_orders(
+        &self,
+        symbol: &str,
+        query: &LargeOrdersQuery,
+    ) -> Result<Vec<LargeOrderRecord>, ApiError> {
+        self.client
+            .query(
+                r#"
+                SELECT ts, session_date, symbol_contract, method, threshold, trade_price, trade_size, side
+                FROM large_orders
+                WHERE symbol_contract = ?
+                  AND method = ?
+                  AND threshold = ?
+                  AND ts >= ?
+                  AND ts <= ?
+                ORDER BY ts
+                "#,
+            )
+            .bind(symbol)
+            .bind(query.method.clone())
+            .bind(query.fixed_threshold)
+            .bind(query.start)
+            .bind(query.end)
+            .fetch_all::<LargeOrderRecord>()
+            .await
+            .map_err(map_clickhouse_err)
+    }
+
     pub async fn load_preset_profiles(
         &self,
         symbol: &str,
@@ -510,6 +538,64 @@ impl ClickHouseMarketStore {
         level_insert.end().await.context("failed to finalize profile level insert")?;
         Ok(())
     }
+
+    pub async fn insert_large_orders(&self, rows: &[LargeOrderRow]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self
+            .client
+            .insert("large_orders")
+            .context("failed to create large order insert")?;
+        for row in rows {
+            insert
+                .write(row)
+                .await
+                .context("failed to write large order row")?;
+        }
+        insert
+            .end()
+            .await
+            .context("failed to finalize large order insert")?;
+        Ok(())
+    }
+
+    pub async fn clear_large_orders(
+        &self,
+        symbol_contract: &str,
+        method: &str,
+        threshold: f64,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        self.client
+            .query(
+                "ALTER TABLE large_orders DELETE WHERE symbol_contract = ? AND method = ? AND threshold = ? AND ts >= ? AND ts <= ?",
+            )
+            .bind(symbol_contract)
+            .bind(method)
+            .bind(threshold)
+            .bind(start)
+            .bind(end)
+            .execute()
+            .await
+            .context("failed to clear large orders")?;
+        Ok(())
+    }
+
+    pub async fn replace_large_orders(
+        &self,
+        symbol_contract: &str,
+        method: &str,
+        threshold: f64,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        rows: &[LargeOrderRow],
+    ) -> anyhow::Result<()> {
+        self.clear_large_orders(symbol_contract, method, threshold, start, end)
+            .await?;
+        self.insert_large_orders(rows).await
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -563,6 +649,16 @@ pub struct AreaProfileQuery {
     #[serde(default = "default_value_area_percent")]
     pub value_area_percent: f64,
     pub area_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct LargeOrdersQuery {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    #[serde(default = "default_large_orders_method")]
+    pub method: String,
+    #[serde(default = "default_large_orders_threshold")]
+    pub fixed_threshold: f64,
 }
 
 impl BarsQuery {
@@ -626,6 +722,21 @@ impl AreaProfileQuery {
             .map_err(|_| ApiError::bad_request("timezone must be a valid IANA timezone"))?;
         if self.tick_aggregation == 0 {
             return Err(ApiError::bad_request("tick_aggregation must be greater than 0"));
+        }
+        Ok(())
+    }
+}
+
+impl LargeOrdersQuery {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.end < self.start {
+            return Err(ApiError::bad_request("end must be after start"));
+        }
+        if self.method != "fixed" {
+            return Err(ApiError::bad_request("method must be fixed"));
+        }
+        if self.fixed_threshold <= 0.0 {
+            return Err(ApiError::bad_request("fixed_threshold must be greater than 0"));
         }
         Ok(())
     }
@@ -734,6 +845,31 @@ pub struct BarRecord {
     pub close: f64,
     pub volume: f64,
     pub trade_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Row)]
+pub struct LargeOrderRecord {
+    pub ts: DateTime<Utc>,
+    pub session_date: chrono::NaiveDate,
+    pub symbol_contract: String,
+    pub method: String,
+    pub threshold: f64,
+    pub trade_price: f64,
+    pub trade_size: f64,
+    pub side: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Row)]
+pub struct LargeOrderRow {
+    pub ts: DateTime<Utc>,
+    pub trading_day: chrono::NaiveDate,
+    pub session_date: chrono::NaiveDate,
+    pub symbol_contract: String,
+    pub method: String,
+    pub threshold: f64,
+    pub trade_price: f64,
+    pub trade_size: f64,
+    pub side: String,
 }
 
 #[derive(Clone, Debug)]
@@ -985,8 +1121,46 @@ fn aggregate_levels(
         .collect()
 }
 
+pub fn build_large_orders_from_ticks(
+    symbol_contract: &str,
+    ticks: &[CanonicalTick],
+    method: &str,
+    fixed_threshold: f64,
+) -> Vec<LargeOrderRow> {
+    if method != "fixed" || fixed_threshold <= 0.0 {
+        return Vec::new();
+    }
+
+    ticks.iter()
+        .filter(|tick| tick.trade_size >= fixed_threshold)
+        .map(|tick| LargeOrderRow {
+            ts: tick.ts,
+            trading_day: tick.trading_day,
+            session_date: tick.session_date,
+            symbol_contract: symbol_contract.to_string(),
+            method: "fixed".to_string(),
+            threshold: fixed_threshold,
+            trade_price: tick.trade_price,
+            trade_size: tick.trade_size,
+            side: match classify_side(tick.trade_price, tick.bid_price, tick.ask_price) {
+                side if side > 0.0 => "buy".to_string(),
+                side if side < 0.0 => "sell".to_string(),
+                _ => "unknown".to_string(),
+            },
+        })
+        .collect()
+}
+
 fn default_bar_type() -> String {
     "time".to_string()
+}
+
+fn default_large_orders_method() -> String {
+    "fixed".to_string()
+}
+
+fn default_large_orders_threshold() -> f64 {
+    25.0
 }
 
 fn default_metric() -> String {
