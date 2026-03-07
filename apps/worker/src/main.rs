@@ -8,7 +8,8 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use backtest::{
     build_trade_records, merge_orb_params, parse_orb_split_config, simulate_orb_breakout_strategy,
-    summarize_breakout_trades, NewRunInput, OrbRunSummary, PgBacktestStore, StrategyBar,
+    summarize_breakout_trades, BacktestTradeRecord, NewRunInput, OrbRunSummary, PgBacktestStore,
+    StrategyBar,
 };
 use chrono::{DateTime, Utc};
 use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
@@ -108,7 +109,8 @@ async fn dispatch_job(
             .await
         }
         "dataset_export" => {
-            handle_dataset_export(settings, jobs, market, job_id, worker_id, payload).await
+            handle_dataset_export(settings, jobs, market, backtests, job_id, worker_id, payload)
+                .await
         }
         other => Err(format!("unknown job type: {other}")),
     }
@@ -772,6 +774,7 @@ async fn handle_dataset_export(
     settings: &Settings,
     jobs: &PgJobStore,
     market: &ClickHouseMarketStore,
+    backtests: &PgBacktestStore,
     job_id: Uuid,
     worker_id: &str,
     payload: &Value,
@@ -803,6 +806,17 @@ async fn handle_dataset_export(
             export_ticks_dataset(
                 jobs,
                 market,
+                job_id,
+                worker_id,
+                &artifact_root,
+                export_payload,
+            )
+            .await
+        }
+        "backtest_trades" => {
+            export_backtest_trades_dataset(
+                jobs,
+                backtests,
                 job_id,
                 worker_id,
                 &artifact_root,
@@ -1083,6 +1097,124 @@ async fn export_ticks_dataset(
     }))
 }
 
+async fn export_backtest_trades_dataset(
+    jobs: &PgJobStore,
+    backtests: &PgBacktestStore,
+    job_id: Uuid,
+    worker_id: &str,
+    artifact_root: &PathBuf,
+    payload: Value,
+) -> std::result::Result<Value, String> {
+    let run_id = serde_json::from_value::<Uuid>(
+        payload
+            .get("run_id")
+            .cloned()
+            .ok_or_else(|| "backtest_trades export requires payload.run_id".to_string())?,
+    )
+    .map_err(|error| format!("invalid export run_id: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "loading_export_data",
+        json!({
+            "export_kind": "backtest_trades",
+            "run_id": run_id,
+        }),
+    )
+    .await?;
+
+    let run = backtests
+        .get_run(run_id)
+        .await
+        .map_err(|error| format!("failed to load backtest run: {error}"))?
+        .ok_or_else(|| format!("backtest run not found: {run_id}"))?;
+    let trades = backtests
+        .get_run_trades(run_id)
+        .await
+        .map_err(|error| format!("failed to load backtest trades: {error}"))?;
+
+    let export_dir = artifact_root.join("dataset_exports").join(job_id.to_string());
+    fs::create_dir_all(&export_dir)
+        .await
+        .map_err(|error| format!("failed to create export directory: {error}"))?;
+    let data_path = export_dir.join("backtest_trades.parquet");
+    let manifest_path = export_dir.join("manifest.json");
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "writing_export_files",
+        json!({ "data_path": data_path, "row_count": trades.len() }),
+    )
+    .await?;
+    write_backtest_trades_parquet(&data_path, &trades)
+        .map_err(|error| format!("failed to write backtest trades parquet: {error}"))?;
+
+    let schema_version = "backtest_trades.v1";
+    let manifest = json!({
+        "job_id": job_id,
+        "export_kind": "backtest_trades",
+        "schema_version": schema_version,
+        "files": [
+            {
+                "kind": "parquet",
+                "path": data_path,
+                "rows": trades.len(),
+            }
+        ],
+        "request": {
+            "run_id": run_id,
+        },
+        "run": {
+            "id": run.id,
+            "strategy_id": run.strategy_id,
+            "name": run.name,
+            "status": run.status,
+            "params_json": run.params_json,
+            "metrics_json": run.metrics_json,
+        },
+        "row_count": trades.len(),
+    });
+
+    let manifest_string = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed to encode manifest: {error}"))?;
+    fs::write(&manifest_path, manifest_string)
+        .await
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "recording_export",
+        json!({ "manifest_path": manifest_path }),
+    )
+    .await?;
+    let export_record = jobs
+        .record_dataset_export(
+            Some(job_id),
+            "backtest_trades",
+            manifest_path
+                .to_str()
+                .ok_or_else(|| "manifest path is not valid UTF-8".to_string())?,
+            schema_version,
+            manifest.clone(),
+        )
+        .await
+        .map_err(|error| format!("failed to record dataset export: {error}"))?;
+
+    Ok(json!({
+        "status": "dataset_exported",
+        "export_id": export_record.id,
+        "export_kind": "backtest_trades",
+        "manifest_path": manifest_path,
+        "row_count": trades.len(),
+    }))
+}
+
 async fn update_stage(
     jobs: &PgJobStore,
     job_id: Uuid,
@@ -1248,6 +1380,80 @@ fn write_ticks_parquet(path: &PathBuf, rows: &[market::TickRecord]) -> anyhow::R
             Arc::new(trade_sizes),
             Arc::new(bid_prices),
             Arc::new(ask_prices),
+        ],
+    )?;
+
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+fn write_backtest_trades_parquet(
+    path: &PathBuf,
+    rows: &[BacktestTradeRecord],
+) -> anyhow::Result<()> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("run_id", DataType::Utf8, false),
+        Field::new("symbol_contract", DataType::Utf8, false),
+        Field::new("entry_ts", DataType::Utf8, true),
+        Field::new("exit_ts", DataType::Utf8, true),
+        Field::new("entry_price", DataType::Float64, true),
+        Field::new("exit_price", DataType::Float64, true),
+        Field::new("qty", DataType::Float64, true),
+        Field::new("pnl", DataType::Float64, true),
+        Field::new("notes_json", DataType::Utf8, false),
+        Field::new("created_at", DataType::Utf8, false),
+    ]));
+
+    let ids = StringArray::from(rows.iter().map(|row| row.id.to_string()).collect::<Vec<_>>());
+    let run_ids = StringArray::from(rows.iter().map(|row| row.run_id.to_string()).collect::<Vec<_>>());
+    let symbol_contracts = StringArray::from(
+        rows.iter()
+            .map(|row| row.symbol_contract.clone())
+            .collect::<Vec<_>>(),
+    );
+    let entry_ts = StringArray::from(
+        rows.iter()
+            .map(|row| row.entry_ts.map(|value| value.to_rfc3339()))
+            .collect::<Vec<_>>(),
+    );
+    let exit_ts = StringArray::from(
+        rows.iter()
+            .map(|row| row.exit_ts.map(|value| value.to_rfc3339()))
+            .collect::<Vec<_>>(),
+    );
+    let entry_prices = Float64Array::from(rows.iter().map(|row| row.entry_price).collect::<Vec<_>>());
+    let exit_prices = Float64Array::from(rows.iter().map(|row| row.exit_price).collect::<Vec<_>>());
+    let qty = Float64Array::from(rows.iter().map(|row| row.qty).collect::<Vec<_>>());
+    let pnl = Float64Array::from(rows.iter().map(|row| row.pnl).collect::<Vec<_>>());
+    let notes = StringArray::from(
+        rows.iter()
+            .map(|row| row.notes_json.to_string())
+            .collect::<Vec<_>>(),
+    );
+    let created_at = StringArray::from(
+        rows.iter()
+            .map(|row| row.created_at.to_rfc3339())
+            .collect::<Vec<_>>(),
+    );
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(ids) as ArrayRef,
+            Arc::new(run_ids),
+            Arc::new(symbol_contracts),
+            Arc::new(entry_ts),
+            Arc::new(exit_ts),
+            Arc::new(entry_prices),
+            Arc::new(exit_prices),
+            Arc::new(qty),
+            Arc::new(pnl),
+            Arc::new(notes),
+            Arc::new(created_at),
         ],
     )?;
 
