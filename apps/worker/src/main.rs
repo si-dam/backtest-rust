@@ -1,6 +1,6 @@
 use anyhow::Result;
 use app_core::{config::Settings, telemetry::init_tracing};
-use jobs::{CreateJobInput, JobType, PgJobStore};
+use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
 use market::{
     build_non_time_bars_from_ticks, build_profiles_for_ticks, build_time_bars_from_ticks, derive_symbol_root,
     detect_tick_size, parse_market_data_file, sha256_hex, summarize_parsed_data, CanonicalTick, CanonicalTickRow,
@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use tokio::fs;
 use tokio::time::{sleep, Duration};
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -29,8 +30,17 @@ async fn main() -> Result<()> {
     loop {
         if let Some(job) = jobs.claim_next_job(&worker_id, 30).await? {
             tracing::info!(job_id = %job.id, job_type = %job.job_type, "claimed job");
-            jobs.heartbeat(job.id, &worker_id, 30, "dispatching").await?;
-            let result = dispatch_job(&settings, &jobs, &market, &job.job_type, &job.payload_json).await;
+            jobs.update_progress(
+                job.id,
+                &worker_id,
+                30,
+                JobProgressUpdate {
+                    stage: "dispatching".to_string(),
+                    detail_json: json!({ "job_type": job.job_type, "attempt": job.attempt }),
+                },
+            )
+            .await?;
+            let result = dispatch_job(&settings, &jobs, &market, job.id, &worker_id, &job.job_type, &job.payload_json).await;
             match result {
                 Ok(summary) => jobs.complete_job(job.id, summary).await?,
                 Err(error) => jobs.fail_job(job.id, &error).await?,
@@ -46,13 +56,15 @@ async fn dispatch_job(
     settings: &Settings,
     jobs: &PgJobStore,
     market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
     job_type: &str,
     payload: &Value,
 ) -> std::result::Result<Value, String> {
     match job_type {
-        "ingestion" => handle_ingestion(settings, jobs, market, payload).await,
-        "build_bars" => handle_build_bars(settings, market, payload).await,
-        "build_profiles" => handle_build_profiles(settings, market, payload).await,
+        "ingestion" => handle_ingestion(settings, jobs, market, job_id, worker_id, payload).await,
+        "build_bars" => handle_build_bars(settings, jobs, market, job_id, worker_id, payload).await,
+        "build_profiles" => handle_build_profiles(settings, jobs, market, job_id, worker_id, payload).await,
         "backtest_run" => Err(format!("backtest worker not implemented yet: {payload}")),
         "dataset_export" => Ok(json!({ "status": "queued_for_export_implementation", "payload": payload })),
         other => Err(format!("unknown job type: {other}")),
@@ -63,8 +75,18 @@ async fn handle_ingestion(
     settings: &Settings,
     jobs: &PgJobStore,
     market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
     payload: &Value,
 ) -> std::result::Result<Value, String> {
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "reading_source",
+        json!({ "file_path": payload.get("file_path") }),
+    )
+    .await?;
     let file_path = payload
         .get("file_path")
         .and_then(Value::as_str)
@@ -90,6 +112,7 @@ async fn handle_ingestion(
             return Err("source path already exists with a different hash; resubmit with rebuild=true".to_string());
         }
     }
+    update_stage(jobs, job_id, worker_id, "parsing_source", json!({ "hash": file_hash })).await?;
     let parsed = parse_market_data_file(std::path::Path::new(file_path), settings.dataset_timezone, symbol_contract)
         .map_err(|error| format!("failed to parse market data file: {error}"))?;
     let summary = summarize_parsed_data(std::path::Path::new(file_path), &parsed);
@@ -101,6 +124,14 @@ async fn handle_ingestion(
 
     match parsed {
         ParsedMarketData::Ticks(ticks) => {
+            update_stage(
+                jobs,
+                job_id,
+                worker_id,
+                "persisting_ticks",
+                json!({ "rows": ticks.len(), "rebuild": rebuild }),
+            )
+            .await?;
             let source_name = file_path.to_string();
             let canonical_rows = ticks
                 .iter()
@@ -133,6 +164,14 @@ async fn handle_ingestion(
                 .await
                 .map_err(|error| format!("failed to record ingested file: {error}"))?;
 
+            update_stage(
+                jobs,
+                job_id,
+                worker_id,
+                "queueing_derivatives",
+                json!({ "symbol_contract": symbol, "start": first.ts, "end": last.ts }),
+            )
+            .await?;
             jobs.create_job(CreateJobInput {
                 job_type: JobType::BuildBars,
                 payload_json: json!({
@@ -162,6 +201,14 @@ async fn handle_ingestion(
             .map_err(|error| format!("failed to enqueue build_profiles job: {error}"))?;
         }
         ParsedMarketData::Ohlc1m(bars) => {
+            update_stage(
+                jobs,
+                job_id,
+                worker_id,
+                "persisting_bars",
+                json!({ "rows": bars.len(), "timeframe": "1m" }),
+            )
+            .await?;
             if let (Some(first), Some(last), Some(symbol)) = (bars.first(), bars.last(), summary.symbol_contract.as_deref()) {
                 market
                     .replace_time_bars(symbol, "1m", first.ts, last.ts, &bars)
@@ -193,7 +240,10 @@ async fn handle_ingestion(
 
 async fn handle_build_bars(
     settings: &Settings,
+    jobs: &PgJobStore,
     market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
     payload: &Value,
 ) -> std::result::Result<Value, String> {
     let symbol_contract = payload
@@ -206,6 +256,14 @@ async fn handle_build_bars(
         .map_err(|error| format!("invalid end: {error}"))?;
     let tick_size = payload.get("tick_size").and_then(Value::as_f64).unwrap_or(0.25);
 
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "loading_ticks",
+        json!({ "symbol_contract": symbol_contract, "start": start, "end": end }),
+    )
+    .await?;
     let tick_rows = market
         .load_ticks(symbol_contract, &TicksQuery { start, end })
         .await
@@ -214,6 +272,14 @@ async fn handle_build_bars(
 
     let mut inserted_timeframes = Vec::new();
     for timeframe in ["1m", "3m", "5m", "15m", "30m", "60m"] {
+        update_stage(
+            jobs,
+            job_id,
+            worker_id,
+            "building_time_bars",
+            json!({ "symbol_contract": symbol_contract, "timeframe": timeframe }),
+        )
+        .await?;
         let bars = build_time_bars_from_ticks(&ticks, symbol_contract, timeframe, settings.dataset_timezone)
             .map_err(|error| format!("failed to build {timeframe} bars: {error}"))?;
         market
@@ -225,6 +291,14 @@ async fn handle_build_bars(
 
     let mut inserted_non_time = Vec::new();
     for (bar_type, bar_size) in [("tick", 1500_u32), ("volume", 500_u32), ("volume", 1000_u32), ("range", 40_u32)] {
+        update_stage(
+            jobs,
+            job_id,
+            worker_id,
+            "building_non_time_bars",
+            json!({ "symbol_contract": symbol_contract, "bar_type": bar_type, "bar_size": bar_size }),
+        )
+        .await?;
         let bars = build_non_time_bars_from_ticks(&ticks, symbol_contract, bar_type, bar_size, tick_size, settings.dataset_timezone)
             .map_err(|error| format!("failed to build {bar_type}:{bar_size} bars: {error}"))?;
         market
@@ -244,7 +318,10 @@ async fn handle_build_bars(
 
 async fn handle_build_profiles(
     settings: &Settings,
+    jobs: &PgJobStore,
     market: &ClickHouseMarketStore,
+    job_id: Uuid,
+    worker_id: &str,
     payload: &Value,
 ) -> std::result::Result<Value, String> {
     let symbol_contract = payload
@@ -262,11 +339,27 @@ async fn handle_build_profiles(
         .unwrap_or(settings.dataset_timezone);
     let tick_size = payload.get("tick_size").and_then(Value::as_f64).unwrap_or(0.25);
 
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "loading_ticks",
+        json!({ "symbol_contract": symbol_contract, "start": start, "end": end }),
+    )
+    .await?;
     let tick_rows = market
         .load_ticks(symbol_contract, &TicksQuery { start, end })
         .await
         .map_err(|error| error.to_string())?;
     let ticks = tick_rows_to_canonical(&tick_rows);
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "building_profiles",
+        json!({ "symbol_contract": symbol_contract, "timezone": profile_timezone.name() }),
+    )
+    .await?;
     let profiles = build_profiles_for_ticks(symbol_contract, &ticks, profile_timezone, tick_size);
     market
         .replace_profiles_in_range(symbol_contract, profile_timezone.name(), start, end, &profiles)
@@ -278,6 +371,26 @@ async fn handle_build_profiles(
         "symbol_contract": symbol_contract,
         "profiles": profiles.len(),
     }))
+}
+
+async fn update_stage(
+    jobs: &PgJobStore,
+    job_id: Uuid,
+    worker_id: &str,
+    stage: &str,
+    detail_json: Value,
+) -> std::result::Result<(), String> {
+    jobs.update_progress(
+        job_id,
+        worker_id,
+        30,
+        JobProgressUpdate {
+            stage: stage.to_string(),
+            detail_json,
+        },
+    )
+    .await
+    .map_err(|error| format!("failed to update job progress: {error}"))
 }
 
 fn tick_rows_to_canonical(rows: &[market::TickRecord]) -> Vec<CanonicalTick> {

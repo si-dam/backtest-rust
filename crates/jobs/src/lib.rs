@@ -89,6 +89,12 @@ pub struct JobSubmitted {
     pub job_id: Uuid,
 }
 
+#[derive(Clone, Debug)]
+pub struct JobProgressUpdate {
+    pub stage: String,
+    pub detail_json: Value,
+}
+
 #[derive(Clone)]
 pub struct PgJobStore {
     pool: PgPool,
@@ -107,7 +113,15 @@ impl PgJobStore {
         let record = sqlx::query_as::<_, JobRecord>(
             r#"
             INSERT INTO jobs (job_type, status, payload_json, result_json, error_json, progress_json, max_attempts)
-            VALUES ($1, 'queued', $2, '{}'::jsonb, '{}'::jsonb, '{"stage":"queued"}'::jsonb, $3)
+            VALUES (
+                $1,
+                'queued',
+                $2,
+                '{}'::jsonb,
+                '{}'::jsonb,
+                jsonb_build_object('stage', 'queued', 'job_type', $1),
+                $3
+            )
             RETURNING
                 id,
                 job_type,
@@ -192,8 +206,11 @@ impl PgJobStore {
             WITH claimed AS (
                 SELECT id
                 FROM jobs
-                WHERE status IN ('queued', 'failed')
-                  AND (lease_until IS NULL OR lease_until < NOW())
+                WHERE (
+                    status = 'queued'
+                    OR (status = 'failed' AND (lease_until IS NULL OR lease_until < NOW()))
+                    OR (status = 'running' AND lease_until < NOW())
+                )
                   AND attempt < max_attempts
                 ORDER BY created_at
                 LIMIT 1
@@ -205,7 +222,14 @@ impl PgJobStore {
                 locked_by = $1,
                 lease_until = NOW() + make_interval(secs => $2),
                 attempt = attempt + 1,
-                progress_json = jsonb_build_object('stage', 'running', 'worker_id', $1),
+                progress_json = jsonb_build_object(
+                    'stage',
+                    'running',
+                    'worker_id',
+                    $1,
+                    'attempt',
+                    attempt + 1
+                ),
                 updated_at = NOW()
             WHERE id IN (SELECT id FROM claimed)
             RETURNING
@@ -237,13 +261,24 @@ impl PgJobStore {
         Ok(record)
     }
 
-    pub async fn heartbeat(&self, job_id: Uuid, worker_id: &str, lease_seconds: i64, stage: &str) -> anyhow::Result<()> {
+    pub async fn update_progress(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+        progress: JobProgressUpdate,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             r#"
             UPDATE jobs
             SET
                 lease_until = NOW() + make_interval(secs => $3),
-                progress_json = jsonb_set(progress_json, '{stage}', to_jsonb($4::text), true),
+                progress_json = jsonb_build_object(
+                    'stage', $4,
+                    'worker_id', $2,
+                    'detail', $5::jsonb,
+                    'updated_at', NOW()
+                ),
                 updated_at = NOW()
             WHERE id = $1
               AND locked_by = $2
@@ -252,12 +287,26 @@ impl PgJobStore {
         .bind(job_id)
         .bind(worker_id)
         .bind(lease_seconds as i32)
-        .bind(stage)
+        .bind(progress.stage)
+        .bind(progress.detail_json)
         .execute(&self.pool)
         .await
-        .context("failed to heartbeat job")?;
+        .context("failed to update job progress")?;
 
         Ok(())
+    }
+
+    pub async fn heartbeat(&self, job_id: Uuid, worker_id: &str, lease_seconds: i64, stage: &str) -> anyhow::Result<()> {
+        self.update_progress(
+            job_id,
+            worker_id,
+            lease_seconds,
+            JobProgressUpdate {
+                stage: stage.to_string(),
+                detail_json: json!({}),
+            },
+        )
+        .await
     }
 
     pub async fn complete_job(&self, job_id: Uuid, result_json: Value) -> anyhow::Result<()> {
@@ -268,7 +317,7 @@ impl PgJobStore {
                 status = 'succeeded',
                 result_json = $2,
                 error_json = '{}'::jsonb,
-                progress_json = jsonb_build_object('stage', 'completed'),
+                progress_json = jsonb_build_object('stage', 'completed', 'result', $2),
                 lease_until = NULL,
                 locked_by = NULL,
                 updated_at = NOW()
@@ -297,6 +346,7 @@ impl PgJobStore {
             SET
                 status = $2,
                 error_json = jsonb_build_object('message', $3),
+                progress_json = jsonb_build_object('stage', $2, 'error', jsonb_build_object('message', $3)),
                 lease_until = NULL,
                 locked_by = NULL,
                 updated_at = NOW()
@@ -311,6 +361,30 @@ impl PgJobStore {
         .context("failed to fail job")?;
 
         Ok(())
+    }
+
+    pub async fn replay_job(&self, job_id: Uuid) -> anyhow::Result<JobRecord> {
+        let source = self
+            .get_job(job_id)
+            .await?
+            .context("job not found")?;
+
+        let replay = self
+            .create_job(CreateJobInput {
+                job_type: match source.job_type.as_str() {
+                    "ingestion" => JobType::Ingestion,
+                    "build_bars" => JobType::BuildBars,
+                    "build_profiles" => JobType::BuildProfiles,
+                    "backtest_run" => JobType::BacktestRun,
+                    "dataset_export" => JobType::DatasetExport,
+                    other => anyhow::bail!("unsupported job type for replay: {other}"),
+                },
+                payload_json: source.payload_json,
+                max_attempts: source.max_attempts,
+            })
+            .await?;
+
+        Ok(replay)
     }
 
     pub async fn upsert_symbol(

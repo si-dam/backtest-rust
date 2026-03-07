@@ -33,6 +33,11 @@
   - the same source path and hash is treated as a no-op unless `rebuild=true`
   - rebuilds clear and replace affected bars/profiles in-range instead of appending duplicates
   - preset profile persistence now covers both `volume` and `delta`
+- Job control semantics are now explicit:
+  - stale `running` jobs become reclaimable when their lease expires
+  - workers write stage-level progress details into `jobs.progress_json`
+  - operators can clone a failed/dead-letter job with `POST /api/v1/jobs/:job_id/replay`
+  - operators can queue derived rebuild jobs with `POST /api/v1/markets/:symbol/rebuild/jobs`
 - The frontend currently exercises three workflows:
   - submit an ingest job and poll `/api/v1/jobs/:job_id`
   - read persisted bars for charting

@@ -42,6 +42,22 @@ struct DatasetJobRequest {
     payload: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReplayJobRequest {
+    #[serde(default)]
+    allow_any_status: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RebuildMarketRequest {
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    tick_size: Option<f64>,
+    profile_timezone: Option<String>,
+    #[serde(default = "default_rebuild_target")]
+    target: String,
+}
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -63,7 +79,9 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
     let api_v1 = Router::new()
         .route("/ingestion/jobs", post(create_ingestion_job))
         .route("/jobs/:job_id", get(get_job))
+        .route("/jobs/:job_id/replay", post(replay_job))
         .route("/symbols", get(list_symbols))
+        .route("/markets/:symbol/rebuild/jobs", post(create_market_rebuild_jobs))
         .route("/markets/:symbol/ticks", get(get_ticks))
         .route("/markets/:symbol/bars", get(get_bars))
         .route("/markets/:symbol/profiles/preset", get(get_preset_profiles))
@@ -136,6 +154,102 @@ async fn get_job(State(state): State<AppState>, Path(job_id): Path<Uuid>) -> Api
         .ok_or_else(|| ApiError::not_found("job not found"))?;
 
     Ok(Json(json!(job)))
+}
+
+async fn replay_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<Uuid>,
+    Json(payload): Json<ReplayJobRequest>,
+) -> ApiResult<(StatusCode, Json<JobSubmitted>)> {
+    let source = state
+        .jobs
+        .get_job(job_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("job not found"))?;
+
+    if !payload.allow_any_status && !matches!(source.status.as_str(), "failed" | "dead_letter") {
+        return Err(ApiError::bad_request("only failed or dead_letter jobs can be replayed by default"));
+    }
+
+    let replay = state
+        .jobs
+        .replay_job(job_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    Ok((StatusCode::ACCEPTED, Json(JobSubmitted { job_id: replay.id })))
+}
+
+async fn create_market_rebuild_jobs(
+    State(state): State<AppState>,
+    Path(symbol): Path<String>,
+    Json(payload): Json<RebuildMarketRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    if payload.end < payload.start {
+        return Err(ApiError::bad_request("end must be after start"));
+    }
+    if !matches!(payload.target.as_str(), "bars" | "profiles" | "all") {
+        return Err(ApiError::bad_request("target must be one of bars, profiles, all"));
+    }
+
+    let tick_size = payload.tick_size.unwrap_or_else(|| market::detect_tick_size(&symbol));
+    let profile_timezone = payload.profile_timezone.unwrap_or_else(|| state.settings.dataset_timezone.name().to_string());
+    if payload.target != "bars" {
+        profile_timezone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| ApiError::bad_request("profile_timezone must be a valid IANA timezone"))?;
+    }
+
+    let mut submitted = Vec::new();
+    if matches!(payload.target.as_str(), "bars" | "all") {
+        let job = state
+            .jobs
+            .create_job(CreateJobInput {
+                job_type: JobType::BuildBars,
+                payload_json: json!({
+                    "symbol_contract": symbol.clone(),
+                    "start": payload.start,
+                    "end": payload.end,
+                    "tick_size": tick_size,
+                    "rebuild": true,
+                }),
+                max_attempts: 3,
+            })
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        submitted.push(json!({ "job_id": job.id, "job_type": "build_bars" }));
+    }
+
+    if matches!(payload.target.as_str(), "profiles" | "all") {
+        let job = state
+            .jobs
+            .create_job(CreateJobInput {
+                job_type: JobType::BuildProfiles,
+                payload_json: json!({
+                    "symbol_contract": symbol.clone(),
+                    "start": payload.start,
+                    "end": payload.end,
+                    "tick_size": tick_size,
+                    "profile_timezone": profile_timezone,
+                    "rebuild": true,
+                }),
+                max_attempts: 3,
+            })
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        submitted.push(json!({ "job_id": job.id, "job_type": "build_profiles" }));
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "symbol_contract": symbol,
+            "start": payload.start,
+            "end": payload.end,
+            "jobs": submitted,
+        })),
+    ))
 }
 
 async fn list_symbols(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -255,4 +369,8 @@ async fn create_dataset_job(
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
     Ok((StatusCode::ACCEPTED, Json(JobSubmitted { job_id: job.id })))
+}
+
+fn default_rebuild_target() -> String {
+    "all".to_string()
 }
