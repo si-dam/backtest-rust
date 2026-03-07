@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use csv::StringRecord;
 use serde::Serialize;
@@ -240,6 +240,9 @@ fn parse_ohlc_record(
         columns.time,
         dataset_timezone,
     )?;
+    if ts.second() != 0 || ts.timestamp_subsec_nanos() != 0 {
+        anyhow::bail!("OHLC timestamps must be minute-aligned");
+    }
     let symbol_contract = record
         .get(columns.symbol_contract.unwrap_or(usize::MAX))
         .filter(|value| !value.is_empty())
@@ -404,6 +407,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_sierra_datetime_tick_schema() {
+        let path = write_fixture(
+            "backtest-rust-sierra-ticks.txt",
+            "Date Time,Price,Volume,Bid,Ask\n2026-03-01 09:30:00,22000.25,3,22000.0,22000.25\n",
+        );
+        let parsed = parse_market_data_file(&path, New_York, Some("NQH6")).unwrap();
+        match parsed {
+            ParsedMarketData::Ticks(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].symbol_contract, "NQH6");
+                assert_eq!(rows[0].trade_price, 22000.25);
+                assert_eq!(rows[0].trade_size, 3.0);
+                assert_eq!(rows[0].bid_price, Some(22000.0));
+                assert_eq!(rows[0].ask_price, Some(22000.25));
+            }
+            ParsedMarketData::Ohlc1m(_) => panic!("expected tick rows"),
+        }
+    }
+
+    #[test]
     fn parses_ohlc_schema() {
         let path = write_fixture(
             "backtest-rust-ohlc.csv",
@@ -412,6 +435,28 @@ mod tests {
         let parsed = parse_market_data_file(&path, New_York, Some("NQH6")).unwrap();
         match parsed {
             ParsedMarketData::Ohlc1m(rows) => assert_eq!(rows[0].timeframe, "1m"),
+            ParsedMarketData::Ticks(_) => panic!("expected ohlc rows"),
+        }
+    }
+
+    #[test]
+    fn parses_sierra_ohlc_with_extra_columns() {
+        let path = write_fixture(
+            "backtest-rust-sierra-ohlc.txt",
+            concat!(
+                "Date,Time,Open,High,Low,Last,Volume,NumberOfTrades,BidVolume,AskVolume\n",
+                "2026/03/01,09:30:00,100,101,99,100.5,10,4,5,5\n",
+            ),
+        );
+        let parsed = parse_market_data_file(&path, New_York, Some("NQH6")).unwrap();
+        match parsed {
+            ParsedMarketData::Ohlc1m(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].timeframe, "1m");
+                assert_eq!(rows[0].symbol_contract, "NQH6");
+                assert_eq!(rows[0].trade_count, 4);
+                assert_eq!(rows[0].close, 100.5);
+            }
             ParsedMarketData::Ticks(_) => panic!("expected ohlc rows"),
         }
     }
@@ -440,5 +485,18 @@ mod tests {
 
         assert!(message.contains("failed to parse tick row 2"));
         assert!(message.contains("invalid timestamp from date/time fields: 2026-03-01 bad-time"));
+    }
+
+    #[test]
+    fn rejects_non_minute_aligned_ohlc_timestamps() {
+        let path = write_fixture(
+            "backtest-rust-bad-ohlc-ts.txt",
+            "Date,Time,Open,High,Low,Last,Volume,NumberOfTrades\n2026/03/01,09:30:00.500,100,101,99,100.5,10,4\n",
+        );
+        let error = parse_market_data_file(&path, New_York, Some("NQH6")).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("failed to parse OHLC row 2"));
+        assert!(message.contains("OHLC timestamps must be minute-aligned"));
     }
 }
