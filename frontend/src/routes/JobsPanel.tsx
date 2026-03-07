@@ -21,7 +21,7 @@ export default function JobsPanel({ selectedSymbol }: JobsPanelProps) {
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useState("all");
   const [jobTypeFilter, setJobTypeFilter] = useState("all");
-  const [rebuildTarget, setRebuildTarget] = useState<"bars" | "profiles" | "all">("all");
+  const [rebuildTarget, setRebuildTarget] = useState<"bars" | "profiles" | "large_orders" | "all">("all");
   const [lookbackDays, setLookbackDays] = useState("5");
   const [largeOrdersThreshold, setLargeOrdersThreshold] = useState("25");
   const [profileTimezone, setProfileTimezone] = useState("America/New_York");
@@ -112,11 +112,14 @@ export default function JobsPanel({ selectedSymbol }: JobsPanelProps) {
               <select
                 className="field-input"
                 value={rebuildTarget}
-                onChange={(event) => setRebuildTarget(event.target.value as "bars" | "profiles" | "all")}
+                onChange={(event) =>
+                  setRebuildTarget(event.target.value as "bars" | "profiles" | "large_orders" | "all")
+                }
               >
-                <option value="all">Bars + profiles</option>
+                <option value="all">Bars + profiles + large orders</option>
                 <option value="bars">Bars only</option>
                 <option value="profiles">Profiles only</option>
+                <option value="large_orders">Large orders only</option>
               </select>
             </label>
             <label className="field">

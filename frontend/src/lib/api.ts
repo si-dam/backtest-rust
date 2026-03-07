@@ -252,7 +252,7 @@ export function createMarketRebuildJobs(
     tick_size?: number;
     large_orders_threshold?: number;
     profile_timezone?: string;
-    target?: "bars" | "profiles" | "all";
+    target?: "bars" | "profiles" | "large_orders" | "all";
   },
 ) {
   return postJson<typeof payload, RebuildJobResponse>(`/markets/${symbolContract}/rebuild/jobs`, payload);

@@ -359,6 +359,18 @@ async fn handle_build_bars(
         .get("large_orders_threshold")
         .and_then(Value::as_f64)
         .unwrap_or(25.0);
+    let build_time_bars = payload
+        .get("build_time_bars")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let build_non_time_bars = payload
+        .get("build_non_time_bars")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let build_large_orders = payload
+        .get("build_large_orders")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     if large_order_threshold <= 0.0 {
         return Err("large_orders_threshold must be greater than 0".to_string());
     }
@@ -378,90 +390,102 @@ async fn handle_build_bars(
     let ticks = tick_rows_to_canonical(&tick_rows);
 
     let mut inserted_timeframes = Vec::new();
-    for timeframe in ["1m", "3m", "5m", "15m", "30m", "60m"] {
-        update_stage(
-            jobs,
-            job_id,
-            worker_id,
-            "building_time_bars",
-            json!({ "symbol_contract": symbol_contract, "timeframe": timeframe }),
-        )
-        .await?;
-        let bars = build_time_bars_from_ticks(
-            &ticks,
-            symbol_contract,
-            timeframe,
-            settings.dataset_timezone,
-        )
-        .map_err(|error| format!("failed to build {timeframe} bars: {error}"))?;
-        market
-            .replace_time_bars(symbol_contract, timeframe, start, end, &bars)
-            .await
-            .map_err(|error| format!("failed to replace {timeframe} bars: {error}"))?;
-        inserted_timeframes.push(json!({ "timeframe": timeframe, "rows": bars.len() }));
+    if build_time_bars {
+        for timeframe in ["1m", "3m", "5m", "15m", "30m", "60m"] {
+            update_stage(
+                jobs,
+                job_id,
+                worker_id,
+                "building_time_bars",
+                json!({ "symbol_contract": symbol_contract, "timeframe": timeframe }),
+            )
+            .await?;
+            let bars = build_time_bars_from_ticks(
+                &ticks,
+                symbol_contract,
+                timeframe,
+                settings.dataset_timezone,
+            )
+            .map_err(|error| format!("failed to build {timeframe} bars: {error}"))?;
+            market
+                .replace_time_bars(symbol_contract, timeframe, start, end, &bars)
+                .await
+                .map_err(|error| format!("failed to replace {timeframe} bars: {error}"))?;
+            inserted_timeframes.push(json!({ "timeframe": timeframe, "rows": bars.len() }));
+        }
     }
 
     let mut inserted_non_time = Vec::new();
-    for (bar_type, bar_size) in [
-        ("tick", 1500_u32),
-        ("volume", 500_u32),
-        ("volume", 1000_u32),
-        ("range", 40_u32),
-    ] {
+    if build_non_time_bars {
+        for (bar_type, bar_size) in [
+            ("tick", 1500_u32),
+            ("volume", 500_u32),
+            ("volume", 1000_u32),
+            ("range", 40_u32),
+        ] {
+            update_stage(
+                jobs,
+                job_id,
+                worker_id,
+                "building_non_time_bars",
+                json!({ "symbol_contract": symbol_contract, "bar_type": bar_type, "bar_size": bar_size }),
+            )
+            .await?;
+            let bars = build_non_time_bars_from_ticks(
+                &ticks,
+                symbol_contract,
+                bar_type,
+                bar_size,
+                tick_size,
+                settings.dataset_timezone,
+            )
+            .map_err(|error| format!("failed to build {bar_type}:{bar_size} bars: {error}"))?;
+            market
+                .replace_non_time_bars(symbol_contract, bar_type, bar_size, start, end, &bars)
+                .await
+                .map_err(|error| format!("failed to replace {bar_type}:{bar_size} bars: {error}"))?;
+            inserted_non_time
+                .push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
+        }
+    }
+
+    let large_orders = if build_large_orders {
         update_stage(
             jobs,
             job_id,
             worker_id,
-            "building_non_time_bars",
-            json!({ "symbol_contract": symbol_contract, "bar_type": bar_type, "bar_size": bar_size }),
+            "building_large_orders",
+            json!({
+                "symbol_contract": symbol_contract,
+                "method": "fixed",
+                "fixed_threshold": large_order_threshold,
+            }),
         )
         .await?;
-        let bars = build_non_time_bars_from_ticks(
-            &ticks,
-            symbol_contract,
-            bar_type,
-            bar_size,
-            tick_size,
-            settings.dataset_timezone,
-        )
-        .map_err(|error| format!("failed to build {bar_type}:{bar_size} bars: {error}"))?;
+        let rows =
+            build_large_orders_from_ticks(symbol_contract, &ticks, "fixed", large_order_threshold);
         market
-            .replace_non_time_bars(symbol_contract, bar_type, bar_size, start, end, &bars)
+            .replace_large_orders(
+                symbol_contract,
+                "fixed",
+                large_order_threshold,
+                start,
+                end,
+                &rows,
+            )
             .await
-            .map_err(|error| format!("failed to replace {bar_type}:{bar_size} bars: {error}"))?;
-        inserted_non_time
-            .push(json!({ "bar_type": bar_type, "bar_size": bar_size, "rows": bars.len() }));
-    }
-
-    update_stage(
-        jobs,
-        job_id,
-        worker_id,
-        "building_large_orders",
-        json!({
-            "symbol_contract": symbol_contract,
-            "method": "fixed",
-            "fixed_threshold": large_order_threshold,
-        }),
-    )
-    .await?;
-    let large_orders =
-        build_large_orders_from_ticks(symbol_contract, &ticks, "fixed", large_order_threshold);
-    market
-        .replace_large_orders(
-            symbol_contract,
-            "fixed",
-            large_order_threshold,
-            start,
-            end,
-            &large_orders,
-        )
-        .await
-        .map_err(|error| format!("failed to replace fixed large orders: {error}"))?;
+            .map_err(|error| format!("failed to replace fixed large orders: {error}"))?;
+        rows
+    } else {
+        Vec::new()
+    };
 
     Ok(json!({
         "status": "bars_built",
         "symbol_contract": symbol_contract,
+        "build_time_bars": build_time_bars,
+        "build_non_time_bars": build_non_time_bars,
+        "build_large_orders": build_large_orders,
         "time_bars": inserted_timeframes,
         "non_time_bars": inserted_non_time,
         "large_orders": {

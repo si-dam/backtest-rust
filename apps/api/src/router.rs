@@ -220,8 +220,10 @@ async fn create_market_rebuild_jobs(
     if payload.end < payload.start {
         return Err(ApiError::bad_request("end must be after start"));
     }
-    if !matches!(payload.target.as_str(), "bars" | "profiles" | "all") {
-        return Err(ApiError::bad_request("target must be one of bars, profiles, all"));
+    if !matches!(payload.target.as_str(), "bars" | "profiles" | "large_orders" | "all") {
+        return Err(ApiError::bad_request(
+            "target must be one of bars, profiles, large_orders, all",
+        ));
     }
 
     let tick_size = payload.tick_size.unwrap_or_else(|| market::detect_tick_size(&symbol));
@@ -237,7 +239,9 @@ async fn create_market_rebuild_jobs(
     }
 
     let mut submitted = Vec::new();
-    if matches!(payload.target.as_str(), "bars" | "all") {
+    if matches!(payload.target.as_str(), "bars" | "large_orders" | "all") {
+        let include_bars = matches!(payload.target.as_str(), "bars" | "all");
+        let include_large_orders = matches!(payload.target.as_str(), "large_orders" | "all");
         let job = state
             .jobs
             .create_job(CreateJobInput {
@@ -248,6 +252,9 @@ async fn create_market_rebuild_jobs(
                     "end": payload.end,
                     "tick_size": tick_size,
                     "large_orders_threshold": large_orders_threshold,
+                    "build_time_bars": include_bars,
+                    "build_non_time_bars": include_bars,
+                    "build_large_orders": include_large_orders,
                     "rebuild": true,
                 }),
                 max_attempts: 3,
