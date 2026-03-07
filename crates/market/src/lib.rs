@@ -9,13 +9,18 @@ use app_core::error::ApiError;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use clickhouse::{error::Error as ClickHouseError, Client, Row};
-use profiles::{build_preset_profiles, build_value_area, bucket_price, classify_side};
+use profiles::{bucket_price, build_preset_profiles, build_value_area, classify_side};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-pub use bars::{build_bar_records, build_non_time_bars_from_ticks, build_time_bars_from_ticks, timeframe_to_seconds};
-pub use ingest::{parse_market_data_file, summarize_parsed_data, ParsedFileSummary, ParsedMarketData};
+pub use bars::{
+    build_bar_records, build_non_time_bars_from_ticks, build_time_bars_from_ticks,
+    timeframe_to_seconds,
+};
+pub use ingest::{
+    parse_market_data_file, summarize_parsed_data, ParsedFileSummary, ParsedMarketData,
+};
 
 #[derive(Clone)]
 pub struct ClickHouseMarketStore {
@@ -38,7 +43,11 @@ impl ClickHouseMarketStore {
             .map_err(map_clickhouse_err)
     }
 
-    pub async fn load_ticks(&self, symbol: &str, query: &TicksQuery) -> Result<Vec<TickRecord>, ApiError> {
+    pub async fn load_ticks(
+        &self,
+        symbol: &str,
+        query: &TicksQuery,
+    ) -> Result<Vec<TickRecord>, ApiError> {
         self.client
             .query(
                 r#"
@@ -58,7 +67,11 @@ impl ClickHouseMarketStore {
             .map_err(map_clickhouse_err)
     }
 
-    pub async fn load_bars(&self, symbol: &str, query: &BarsQuery) -> Result<Vec<BarRecord>, ApiError> {
+    pub async fn load_bars(
+        &self,
+        symbol: &str,
+        query: &BarsQuery,
+    ) -> Result<Vec<BarRecord>, ApiError> {
         if query.bar_type == "time" {
             return self
                 .client
@@ -212,7 +225,8 @@ impl ClickHouseMarketStore {
         for segment in segments {
             let levels = self.load_segment_levels(segment.segment_id).await?;
             let aggregation = query.tick_aggregation.max(1);
-            let grouped = aggregate_levels(&levels, aggregation, segment.base_tick_size, &query.metric);
+            let grouped =
+                aggregate_levels(&levels, aggregation, segment.base_tick_size, &query.metric);
             let value_area = if query.value_area_enabled && query.metric == "volume" {
                 build_value_area(&grouped, query.value_area_percent)
             } else {
@@ -223,7 +237,10 @@ impl ClickHouseMarketStore {
                 label: segment.label,
                 start: segment.segment_start,
                 end: segment.segment_end,
-                max_value: grouped.iter().map(|row| row.value.abs()).fold(0.0, f64::max),
+                max_value: grouped
+                    .iter()
+                    .map(|row| row.value.abs())
+                    .fold(0.0, f64::max),
                 total_value: grouped.iter().map(|row| row.value).sum(),
                 value_area_enabled: value_area.enabled,
                 value_area_percent: value_area.percent,
@@ -250,14 +267,15 @@ impl ClickHouseMarketStore {
         symbol: &str,
         query: &AreaProfileQuery,
     ) -> Result<AreaProfileResponse, ApiError> {
-        let ticks = self.load_ticks(
-            symbol,
-            &TicksQuery {
-                start: query.start,
-                end: query.end,
-            },
-        )
-        .await?;
+        let ticks = self
+            .load_ticks(
+                symbol,
+                &TicksQuery {
+                    start: query.start,
+                    end: query.end,
+                },
+            )
+            .await?;
 
         let tick_size = query.tick_size.unwrap_or(0.25);
         let aggregation = query.tick_aggregation.max(1);
@@ -276,7 +294,10 @@ impl ClickHouseMarketStore {
                 tick.trade_size
             };
             let key = (aggregated_level * 10_000.0).round() as i64;
-            values.entry(key).and_modify(|entry| *entry += value).or_insert(value);
+            values
+                .entry(key)
+                .and_modify(|entry| *entry += value)
+                .or_insert(value);
         }
 
         let levels = values
@@ -316,7 +337,10 @@ impl ClickHouseMarketStore {
         })
     }
 
-    async fn load_segment_levels(&self, segment_id: Uuid) -> Result<Vec<ProfileLevelBaseRow>, ApiError> {
+    async fn load_segment_levels(
+        &self,
+        segment_id: Uuid,
+    ) -> Result<Vec<ProfileLevelBaseRow>, ApiError> {
         self.client
             .query(
                 r#"
@@ -336,11 +360,20 @@ impl ClickHouseMarketStore {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut insert = self.client.insert("ticks").context("failed to create tick insert")?;
+        let mut insert = self
+            .client
+            .insert("ticks")
+            .context("failed to create tick insert")?;
         for row in rows {
-            insert.write(row).await.context("failed to write tick row")?;
+            insert
+                .write(row)
+                .await
+                .context("failed to write tick row")?;
         }
-        insert.end().await.context("failed to finalize tick insert")?;
+        insert
+            .end()
+            .await
+            .context("failed to finalize tick insert")?;
         Ok(())
     }
 
@@ -358,11 +391,20 @@ impl ClickHouseMarketStore {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut insert = self.client.insert("bars_time").context("failed to create time bar insert")?;
+        let mut insert = self
+            .client
+            .insert("bars_time")
+            .context("failed to create time bar insert")?;
         for row in rows {
-            insert.write(row).await.context("failed to write time bar row")?;
+            insert
+                .write(row)
+                .await
+                .context("failed to write time bar row")?;
         }
-        insert.end().await.context("failed to finalize time bar insert")?;
+        insert
+            .end()
+            .await
+            .context("failed to finalize time bar insert")?;
         Ok(())
     }
 
@@ -395,7 +437,8 @@ impl ClickHouseMarketStore {
         end: DateTime<Utc>,
         rows: &[TimeBarRow],
     ) -> anyhow::Result<()> {
-        self.clear_time_bars(symbol_contract, timeframe, start, end).await?;
+        self.clear_time_bars(symbol_contract, timeframe, start, end)
+            .await?;
         self.insert_time_bars(rows).await
     }
 
@@ -408,9 +451,15 @@ impl ClickHouseMarketStore {
             .insert("bars_non_time")
             .context("failed to create non-time bar insert")?;
         for row in rows {
-            insert.write(row).await.context("failed to write non-time bar row")?;
+            insert
+                .write(row)
+                .await
+                .context("failed to write non-time bar row")?;
         }
-        insert.end().await.context("failed to finalize non-time bar insert")?;
+        insert
+            .end()
+            .await
+            .context("failed to finalize non-time bar insert")?;
         Ok(())
     }
 
@@ -479,8 +528,12 @@ impl ClickHouseMarketStore {
             .context("failed to load overlapping profile segments")?;
 
         if !segment_ids.is_empty() {
-            let placeholders = std::iter::repeat_n("?", segment_ids.len()).collect::<Vec<_>>().join(", ");
-            let sql = format!("ALTER TABLE profile_levels_base DELETE WHERE segment_id IN ({placeholders})");
+            let placeholders = std::iter::repeat_n("?", segment_ids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "ALTER TABLE profile_levels_base DELETE WHERE segment_id IN ({placeholders})"
+            );
             let mut query = self.client.query(&sql);
             for segment_id in &segment_ids {
                 query = query.bind(segment_id.segment_id);
@@ -521,8 +574,14 @@ impl ClickHouseMarketStore {
             return Ok(());
         }
 
-        let mut segment_insert = self.client.insert("profile_segments").context("failed to create profile segment insert")?;
-        let mut level_insert = self.client.insert("profile_levels_base").context("failed to create profile level insert")?;
+        let mut segment_insert = self
+            .client
+            .insert("profile_segments")
+            .context("failed to create profile segment insert")?;
+        let mut level_insert = self
+            .client
+            .insert("profile_levels_base")
+            .context("failed to create profile level insert")?;
 
         for profile in profiles {
             segment_insert
@@ -530,12 +589,21 @@ impl ClickHouseMarketStore {
                 .await
                 .context("failed to write profile segment")?;
             for level in &profile.levels {
-                level_insert.write(level).await.context("failed to write profile level")?;
+                level_insert
+                    .write(level)
+                    .await
+                    .context("failed to write profile level")?;
             }
         }
 
-        segment_insert.end().await.context("failed to finalize profile segment insert")?;
-        level_insert.end().await.context("failed to finalize profile level insert")?;
+        segment_insert
+            .end()
+            .await
+            .context("failed to finalize profile segment insert")?;
+        level_insert
+            .end()
+            .await
+            .context("failed to finalize profile level insert")?;
         Ok(())
     }
 
@@ -668,15 +736,22 @@ impl BarsQuery {
         }
         match self.bar_type.as_str() {
             "time" => {
-                timeframe_to_seconds(&self.timeframe)
-                    .map_err(|error| ApiError::bad_request(format!("unsupported timeframe: {error}")))?;
+                timeframe_to_seconds(&self.timeframe).map_err(|error| {
+                    ApiError::bad_request(format!("unsupported timeframe: {error}"))
+                })?;
             }
             "tick" | "volume" | "range" => {
                 if self.bar_size.unwrap_or(0) == 0 {
-                    return Err(ApiError::bad_request("bar_size is required for non-time bars"));
+                    return Err(ApiError::bad_request(
+                        "bar_size is required for non-time bars",
+                    ));
                 }
             }
-            _ => return Err(ApiError::bad_request("bar_type must be one of time, tick, volume, range")),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "bar_type must be one of time, tick, volume, range",
+                ))
+            }
         }
         Ok(())
     }
@@ -688,7 +763,9 @@ impl PresetProfileQuery {
             return Err(ApiError::bad_request("end must be after start"));
         }
         if !matches!(self.preset.as_str(), "day" | "week" | "rth" | "eth") {
-            return Err(ApiError::bad_request("preset must be one of day, week, rth, eth"));
+            return Err(ApiError::bad_request(
+                "preset must be one of day, week, rth, eth",
+            ));
         }
         if !matches!(self.metric.as_str(), "volume" | "delta") {
             return Err(ApiError::bad_request("metric must be volume or delta"));
@@ -697,7 +774,9 @@ impl PresetProfileQuery {
             .parse::<Tz>()
             .map_err(|_| ApiError::bad_request("timezone must be a valid IANA timezone"))?;
         if self.tick_aggregation == 0 {
-            return Err(ApiError::bad_request("tick_aggregation must be greater than 0"));
+            return Err(ApiError::bad_request(
+                "tick_aggregation must be greater than 0",
+            ));
         }
         if self.max_segments == 0 {
             return Err(ApiError::bad_request("max_segments must be greater than 0"));
@@ -721,7 +800,9 @@ impl AreaProfileQuery {
             .parse::<Tz>()
             .map_err(|_| ApiError::bad_request("timezone must be a valid IANA timezone"))?;
         if self.tick_aggregation == 0 {
-            return Err(ApiError::bad_request("tick_aggregation must be greater than 0"));
+            return Err(ApiError::bad_request(
+                "tick_aggregation must be greater than 0",
+            ));
         }
         Ok(())
     }
@@ -736,7 +817,9 @@ impl LargeOrdersQuery {
             return Err(ApiError::bad_request("method must be fixed"));
         }
         if self.fixed_threshold <= 0.0 {
-            return Err(ApiError::bad_request("fixed_threshold must be greater than 0"));
+            return Err(ApiError::bad_request(
+                "fixed_threshold must be greater than 0",
+            ));
         }
         Ok(())
     }
@@ -828,7 +911,9 @@ impl From<CanonicalTick> for CanonicalTickRow {
             trade_size: value.trade_size,
             bid_price: value.bid_price,
             ask_price: value.ask_price,
-            source_file: value.source_file.unwrap_or_else(|| "unknown.csv".to_string()),
+            source_file: value
+                .source_file
+                .unwrap_or_else(|| "unknown.csv".to_string()),
         }
     }
 }
@@ -966,7 +1051,9 @@ pub struct NonTimeBarRow {
 impl NonTimeBarRow {
     pub fn from_bar(value: TradingBar) -> Self {
         let (bar_type, bar_size) = match value.kind {
-            TradingBarKind::Time(timeframe) => ("time".to_string(), timeframe.parse::<u32>().unwrap_or(0)),
+            TradingBarKind::Time(timeframe) => {
+                ("time".to_string(), timeframe.parse::<u32>().unwrap_or(0))
+            }
             TradingBarKind::NonTime(bar_type, bar_size) => (bar_type, bar_size),
         };
         Self {
@@ -1107,8 +1194,15 @@ fn aggregate_levels(
     for row in levels {
         let bucket = bucket_price(row.price_level, bucket_size);
         let key = (bucket * 10_000.0).round() as i64;
-        let value = if metric == "delta" { row.delta } else { row.total_volume };
-        grouped.entry(key).and_modify(|existing| *existing += value).or_insert(value);
+        let value = if metric == "delta" {
+            row.delta
+        } else {
+            row.total_volume
+        };
+        grouped
+            .entry(key)
+            .and_modify(|existing| *existing += value)
+            .or_insert(value);
     }
 
     grouped
@@ -1131,7 +1225,8 @@ pub fn build_large_orders_from_ticks(
         return Vec::new();
     }
 
-    ticks.iter()
+    ticks
+        .iter()
         .filter(|tick| tick.trade_size >= fixed_threshold)
         .map(|tick| LargeOrderRow {
             ts: tick.ts,
@@ -1235,4 +1330,109 @@ pub fn build_profiles_for_ticks(
         }
     }
     profiles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_large_orders_from_ticks, CanonicalTick, LargeOrdersQuery};
+    use chrono::{TimeZone, Utc};
+
+    fn sample_ticks() -> Vec<CanonicalTick> {
+        vec![
+            CanonicalTick {
+                ts: Utc.with_ymd_and_hms(2026, 3, 1, 14, 30, 0).unwrap(),
+                trading_day: Utc
+                    .with_ymd_and_hms(2026, 3, 1, 14, 30, 0)
+                    .unwrap()
+                    .date_naive(),
+                session_date: Utc
+                    .with_ymd_and_hms(2026, 3, 1, 14, 30, 0)
+                    .unwrap()
+                    .date_naive(),
+                symbol_contract: "NQH6".to_string(),
+                trade_price: 100.0,
+                trade_size: 10.0,
+                bid_price: Some(99.75),
+                ask_price: Some(100.0),
+                source_file: None,
+            },
+            CanonicalTick {
+                ts: Utc.with_ymd_and_hms(2026, 3, 1, 14, 30, 1).unwrap(),
+                trading_day: Utc
+                    .with_ymd_and_hms(2026, 3, 1, 14, 30, 1)
+                    .unwrap()
+                    .date_naive(),
+                session_date: Utc
+                    .with_ymd_and_hms(2026, 3, 1, 14, 30, 1)
+                    .unwrap()
+                    .date_naive(),
+                symbol_contract: "NQH6".to_string(),
+                trade_price: 99.5,
+                trade_size: 30.0,
+                bid_price: Some(99.5),
+                ask_price: Some(99.75),
+                source_file: None,
+            },
+            CanonicalTick {
+                ts: Utc.with_ymd_and_hms(2026, 3, 1, 14, 30, 2).unwrap(),
+                trading_day: Utc
+                    .with_ymd_and_hms(2026, 3, 1, 14, 30, 2)
+                    .unwrap()
+                    .date_naive(),
+                session_date: Utc
+                    .with_ymd_and_hms(2026, 3, 1, 14, 30, 2)
+                    .unwrap()
+                    .date_naive(),
+                symbol_contract: "NQH6".to_string(),
+                trade_price: 99.625,
+                trade_size: 40.0,
+                bid_price: Some(99.5),
+                ask_price: Some(99.75),
+                source_file: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn builds_fixed_large_orders_and_classifies_side() {
+        let orders = build_large_orders_from_ticks("NQH6", &sample_ticks(), "fixed", 25.0);
+        assert_eq!(orders.len(), 2);
+        assert_eq!(orders[0].trade_size, 30.0);
+        assert_eq!(orders[0].side, "sell");
+        assert_eq!(orders[1].trade_size, 40.0);
+        assert_eq!(orders[1].side, "unknown");
+        assert!(orders.iter().all(|row| row.threshold == 25.0));
+        assert!(orders.iter().all(|row| row.method == "fixed"));
+    }
+
+    #[test]
+    fn validates_large_orders_queries() {
+        let valid = LargeOrdersQuery {
+            start: Utc.with_ymd_and_hms(2026, 3, 1, 14, 30, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 3, 1, 15, 30, 0).unwrap(),
+            method: "fixed".to_string(),
+            fixed_threshold: 25.0,
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid_method = LargeOrdersQuery {
+            method: "relative".to_string(),
+            ..valid.clone()
+        };
+        assert!(invalid_method
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("method must be fixed"));
+
+        let invalid_threshold = LargeOrdersQuery {
+            fixed_threshold: 0.0,
+            ..valid
+        };
+        assert!(invalid_threshold
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("fixed_threshold"));
+    }
 }
