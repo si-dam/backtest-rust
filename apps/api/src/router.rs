@@ -12,7 +12,7 @@ use axum::{
     Json, Router,
 };
 use backtest::{BacktestJobRequest, PgBacktestStore};
-use jobs::{CreateJobInput, JobSubmitted, JobType, PgJobStore};
+use jobs::{CreateJobInput, JobSubmitted, JobType, ListJobsInput, PgJobStore};
 use market::{AreaProfileQuery, BarsQuery, ClickHouseMarketStore, PresetProfileQuery, TicksQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -58,6 +58,13 @@ struct RebuildMarketRequest {
     target: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct JobsListQuery {
+    status: Option<String>,
+    job_type: Option<String>,
+    limit: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -78,6 +85,7 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
 
     let api_v1 = Router::new()
         .route("/ingestion/jobs", post(create_ingestion_job))
+        .route("/jobs", get(list_jobs))
         .route("/jobs/:job_id", get(get_job))
         .route("/jobs/:job_id/replay", post(replay_job))
         .route("/symbols", get(list_symbols))
@@ -154,6 +162,20 @@ async fn get_job(State(state): State<AppState>, Path(job_id): Path<Uuid>) -> Api
         .ok_or_else(|| ApiError::not_found("job not found"))?;
 
     Ok(Json(json!(job)))
+}
+
+async fn list_jobs(State(state): State<AppState>, Query(query): Query<JobsListQuery>) -> ApiResult<Json<Value>> {
+    let jobs = state
+        .jobs
+        .list_jobs(ListJobsInput {
+            status: query.status.as_deref(),
+            job_type: query.job_type.as_deref(),
+            limit: query.limit.unwrap_or(50),
+        })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    Ok(Json(json!({ "jobs": jobs })))
 }
 
 async fn replay_job(

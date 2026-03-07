@@ -192,7 +192,8 @@ button {
 }
 
 .list-row,
-.profile-card {
+.profile-card,
+.job-card {
   padding: 14px 16px;
   border-radius: 18px;
   background: rgba(227, 216, 198, 0.55);
@@ -247,6 +248,20 @@ button {
   cursor: progress;
 }
 
+.secondary-button {
+  border: 1px solid rgba(67, 53, 37, 0.18);
+  border-radius: 14px;
+  padding: 10px 14px;
+  background: rgba(255, 250, 241, 0.82);
+  color: inherit;
+  cursor: pointer;
+}
+
+.secondary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .json-card {
   margin: 0;
   padding: 16px;
@@ -257,12 +272,48 @@ button {
   font-size: 0.82rem;
 }
 
+.compact-card {
+  padding: 12px;
+  font-size: 0.76rem;
+}
+
 .error-copy {
   color: #8b2e18;
 }
 
 .error-card {
   background: #4f2116;
+}
+
+.action-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.status-badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.status-queued {
+  background: #e6d4b4;
+}
+
+.status-running {
+  background: #d8e7cf;
+}
+
+.status-succeeded {
+  background: #c5e0d1;
+}
+
+.status-failed,
+.status-dead_letter {
+  background: #ebc0b6;
 }
 
 @media (max-width: 900px) {

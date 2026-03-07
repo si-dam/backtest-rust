@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getSymbols } from "./lib/api";
 import IngestionPanel from "./routes/IngestionPanel";
+import JobsPanel from "./routes/JobsPanel";
 import MarketOverview from "./routes/MarketOverview";
 import ProfilesPanel from "./routes/ProfilesPanel";
 
-type Page = "market" | "profiles" | "ingestion";
+type Page = "market" | "profiles" | "ingestion" | "jobs";
 
 export default function App() {
   const [page, setPage] = useState<Page>("market");
@@ -82,6 +83,13 @@ export default function App() {
           >
             Ingestion
           </button>
+          <button
+            className={page === "jobs" ? "nav-button active" : "nav-button"}
+            onClick={() => setPage("jobs")}
+            type="button"
+          >
+            Jobs
+          </button>
         </nav>
         <div className="sidebar-card">
           <p className="eyebrow">Runtime contract</p>
@@ -95,6 +103,7 @@ export default function App() {
         {page === "market" ? <MarketOverview selectedSymbol={selectedSymbol} /> : null}
         {page === "profiles" ? <ProfilesPanel selectedSymbol={selectedSymbol} /> : null}
         {page === "ingestion" ? <IngestionPanel selectedSymbol={selectedSymbol} /> : null}
+        {page === "jobs" ? <JobsPanel selectedSymbol={selectedSymbol} /> : null}
       </main>
     </div>
   );

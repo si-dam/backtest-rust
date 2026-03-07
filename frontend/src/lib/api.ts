@@ -20,6 +20,16 @@ export interface JobRecord {
   updated_at: string;
 }
 
+export interface RebuildJobResponse {
+  symbol_contract: string;
+  start: string;
+  end: string;
+  jobs: Array<{
+    job_id: string;
+    job_type: string;
+  }>;
+}
+
 export interface BarRecord {
   ts: string;
   session_date: string;
@@ -97,6 +107,17 @@ export function getJob(jobId: string) {
   return fetchJson<JobRecord>(`/jobs/${jobId}`);
 }
 
+export function getJobs(params?: URLSearchParams) {
+  const suffix = params ? `?${params.toString()}` : "";
+  return fetchJson<{ jobs: JobRecord[] }>(`/jobs${suffix}`);
+}
+
+export function replayJob(jobId: string, allowAnyStatus = false) {
+  return postJson<{ allow_any_status: boolean }, { job_id: string }>(`/jobs/${jobId}/replay`, {
+    allow_any_status: allowAnyStatus,
+  });
+}
+
 export function createIngestionJob(payload: {
   file_path: string;
   symbol_contract?: string;
@@ -122,4 +143,17 @@ export function getPresetProfiles(symbolContract: string, params: URLSearchParam
 
 export function getAreaProfile(symbolContract: string, params: URLSearchParams) {
   return fetchJson<AreaProfileResponse>(`/markets/${symbolContract}/profiles/area?${params.toString()}`);
+}
+
+export function createMarketRebuildJobs(
+  symbolContract: string,
+  payload: {
+    start: string;
+    end: string;
+    tick_size?: number;
+    profile_timezone?: string;
+    target?: "bars" | "profiles" | "all";
+  },
+) {
+  return postJson<typeof payload, RebuildJobResponse>(`/markets/${symbolContract}/rebuild/jobs`, payload);
 }

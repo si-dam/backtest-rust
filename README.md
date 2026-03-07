@@ -51,10 +51,15 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
 - the job system is now harder to operate incorrectly:
   - expired `running` jobs can be reclaimed after lease expiry
   - workers publish stage-level progress into `progress_json`
+  - jobs can be listed and filtered through `GET /api/v1/jobs`
   - failed or dead-letter jobs can be replayed through `/api/v1/jobs/:job_id/replay`
   - derived bars/profiles can be rebuilt by symbol and date range through `/api/v1/markets/:symbol/rebuild/jobs`
 - the market crate can build time bars, non-time bars, and persisted base profile levels for both volume and delta profiles
-- the frontend can read the new `/api/v1` market endpoints for market bars, preset profiles, and area profiles
+- the frontend can now operate the control plane as well as the market views:
+  - ingest files
+  - inspect/replay jobs
+  - queue rebuilds
+  - read market bars, preset profiles, and area profiles
 - fixture-based golden tests now lock down time, tick, volume, and range bars plus multi-preset profile behavior in `crates/market/tests/`
 
 The remaining work is to harden the persistence/query behavior, add dataset export and backtest execution, and validate parity against the imported Python reference app.

@@ -89,6 +89,13 @@ pub struct JobSubmitted {
     pub job_id: Uuid,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ListJobsInput<'a> {
+    pub status: Option<&'a str>,
+    pub job_type: Option<&'a str>,
+    pub limit: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct JobProgressUpdate {
     pub stage: String,
@@ -175,6 +182,41 @@ impl PgJobStore {
         .context("failed to load job")?;
 
         Ok(record)
+    }
+
+    pub async fn list_jobs(&self, input: ListJobsInput<'_>) -> anyhow::Result<Vec<JobRecord>> {
+        let limit = if input.limit <= 0 { 50 } else { input.limit.min(200) };
+        let records = sqlx::query_as::<_, JobRecord>(
+            r#"
+            SELECT
+                id,
+                job_type,
+                status,
+                payload_json,
+                result_json,
+                error_json,
+                progress_json,
+                attempt,
+                max_attempts,
+                lease_until,
+                locked_by,
+                created_at,
+                updated_at
+            FROM jobs
+            WHERE ($1::text IS NULL OR status = $1)
+              AND ($2::text IS NULL OR job_type = $2)
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(input.status)
+        .bind(input.job_type)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list jobs")?;
+
+        Ok(records)
     }
 
     pub async fn get_ingested_file(&self, source_path: &str) -> anyhow::Result<Option<IngestedFileRecord>> {
