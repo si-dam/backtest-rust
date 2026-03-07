@@ -1,7 +1,6 @@
-mod router;
-
 use anyhow::Result;
 use app_core::{config::Settings, telemetry::init_tracing};
+use runtime_api::router;
 use tokio::net::TcpListener;
 
 #[tokio::main]

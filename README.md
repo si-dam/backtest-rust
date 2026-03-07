@@ -68,6 +68,7 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - split runs are supported with paired `[IS]` and `[OOS]` segments from one backtest job payload
   - the frontend can submit and inspect ORB runs
   - fixture-based parity cases for ORB now live under `crates/backtest/tests/`
+  - Postgres-backed integration tests now cover persisted run/trade analytics in `crates/backtest/tests/runtime_store.rs` and the `/api/v1/backtests/*` read/write contract in `apps/api/tests/backtests_api.rs`
 - the first dataset export path now exists:
   - `POST /api/v1/datasets/jobs` accepts `export_kind: "bars"`, `export_kind: "ticks"`, `export_kind: "preset_profiles"`, or `export_kind: "backtest_trades"`
   - the worker writes `bars.parquet`, `ticks.parquet`, `preset_profiles.parquet`, or `backtest_trades.parquet` plus `manifest.json` under `ARTIFACT_ROOT/dataset_exports/<job_id>/`
