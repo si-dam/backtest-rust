@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   createBacktestJob,
-  getBacktestRunAnalytics,
   getBacktestRun,
+  getBacktestRunAnalytics,
   getBacktestRuns,
   getBacktestRunTrades,
   getJob,
@@ -22,9 +22,18 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
   const [ibMinutes, setIbMinutes] = useState("15");
   const [stopMode, setStopMode] = useState("or_boundary");
   const [entryMode, setEntryMode] = useState("first_outside");
+  const [tpMultiple, setTpMultiple] = useState("2");
   const [contracts, setContracts] = useState("1");
+  const [timezone, setTimezone] = useState("America/New_York");
+  const [sessionStart, setSessionStart] = useState("09:30:00");
+  const [sessionEnd, setSessionEnd] = useState("16:00:00");
+  const [rthOnly, setRthOnly] = useState(true);
   const [splitEnabled, setSplitEnabled] = useState(false);
   const [splitAt, setSplitAt] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [segmentFilter, setSegmentFilter] = useState("all");
+  const [runSearch, setRunSearch] = useState("");
+  const [currentSymbolOnly, setCurrentSymbolOnly] = useState(true);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
@@ -34,11 +43,34 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
     refetchInterval: 4000,
   });
 
+  const filteredRuns = (runsQuery.data?.runs ?? []).filter((run) => {
+    const params = run.params_json ?? {};
+    const runSymbol = typeof params.symbol_contract === "string" ? params.symbol_contract : null;
+    const segment = readRunSegment(run) ?? "none";
+    const matchesStatus = statusFilter === "all" || run.status === statusFilter;
+    const matchesSegment =
+      segmentFilter === "all" || (segmentFilter === "none" ? segment === "none" : segment === segmentFilter);
+    const matchesSymbol = !currentSymbolOnly || !selectedSymbol || runSymbol === selectedSymbol;
+    const searchValue = runSearch.trim().toLowerCase();
+    const matchesSearch =
+      searchValue.length === 0 ||
+      run.name.toLowerCase().includes(searchValue) ||
+      run.strategy_id.toLowerCase().includes(searchValue) ||
+      (runSymbol?.toLowerCase().includes(searchValue) ?? false);
+    return matchesStatus && matchesSegment && matchesSymbol && matchesSearch;
+  });
+
   useEffect(() => {
-    if (!selectedRunId && runsQuery.data?.runs.length) {
-      setSelectedRunId(runsQuery.data.runs[0].id);
+    if (!selectedRunId && filteredRuns.length > 0) {
+      setSelectedRunId(filteredRuns[0].id);
     }
-  }, [runsQuery.data, selectedRunId]);
+  }, [filteredRuns, selectedRunId]);
+
+  useEffect(() => {
+    if (selectedRunId && !filteredRuns.some((run) => run.id === selectedRunId)) {
+      setSelectedRunId(filteredRuns[0]?.id ?? null);
+    }
+  }, [filteredRuns, selectedRunId]);
 
   const createJobMutation = useMutation({
     mutationFn: () => {
@@ -48,6 +80,7 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
         splitEnabled && splitAt
           ? new Date(splitAt)
           : new Date(start.getTime() + Math.floor((end.getTime() - start.getTime()) / 2));
+
       return createBacktestJob({
         name,
         strategy_id: "orb_breakout_v1",
@@ -58,10 +91,13 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
           timeframe,
           ib_minutes: Number(ibMinutes),
           stop_mode: stopMode,
-          tp_r_multiple: 2.0,
+          tp_r_multiple: Number(tpMultiple),
           entry_mode: entryMode,
           contracts: Number(contracts),
-          rth_only: true,
+          timezone,
+          session_start: sessionStart,
+          session_end: sessionEnd,
+          rth_only: rthOnly,
           ...(splitEnabled
             ? {
                 split: {
@@ -116,8 +152,35 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
 
   const selectedRun = runDetailQuery.data;
   const selectedParams = selectedRun?.params_json ?? {};
+  const selectedMetrics = selectedRun?.metrics_json ?? {};
   const splitMeta = asRecord(selectedParams.split);
   const latestJobSummary = summarizeJobResult(jobQuery.data);
+  const selectedSymbolFromRun =
+    typeof selectedParams.symbol_contract === "string" ? selectedParams.symbol_contract : null;
+
+  function applySelectedRunParams() {
+    if (!selectedRun) {
+      return;
+    }
+
+    const params = selectedRun.params_json ?? {};
+    setName(selectedRun.name.replace(/\s+\[(IS|OOS)\]$/i, ""));
+    setTimeframe(typeof params.timeframe === "string" ? params.timeframe : "1m");
+    setIbMinutes(String(params.ib_minutes ?? 15));
+    setStopMode(typeof params.stop_mode === "string" ? params.stop_mode : "or_boundary");
+    setEntryMode(typeof params.entry_mode === "string" ? params.entry_mode : "first_outside");
+    setTpMultiple(String(params.tp_r_multiple ?? 2));
+    setContracts(String(params.contracts ?? 1));
+    setTimezone(typeof params.timezone === "string" ? params.timezone : "America/New_York");
+    setSessionStart(typeof params.session_start === "string" ? params.session_start : "09:30:00");
+    setSessionEnd(typeof params.session_end === "string" ? params.session_end : "16:00:00");
+    setRthOnly(typeof params.rth_only === "boolean" ? params.rth_only : true);
+
+    const split = asRecord(params.split);
+    const enabled = split?.enabled === true;
+    setSplitEnabled(enabled);
+    setSplitAt(enabled ? toDatetimeLocalValue(split?.split_at) : "");
+  }
 
   return (
     <section className="panel-grid">
@@ -150,6 +213,8 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
               <option value="3m">3m</option>
               <option value="5m">5m</option>
               <option value="15m">15m</option>
+              <option value="30m">30m</option>
+              <option value="60m">60m</option>
             </select>
           </label>
           <label className="field">
@@ -171,8 +236,32 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             </select>
           </label>
           <label className="field">
+            <span className="field-label">TP multiple</span>
+            <input className="field-input" value={tpMultiple} onChange={(event) => setTpMultiple(event.target.value)} />
+          </label>
+          <label className="field">
             <span className="field-label">Contracts</span>
             <input className="field-input" value={contracts} onChange={(event) => setContracts(event.target.value)} />
+          </label>
+          <label className="field">
+            <span className="field-label">Timezone</span>
+            <select className="field-input" value={timezone} onChange={(event) => setTimezone(event.target.value)}>
+              <option value="America/New_York">America/New_York</option>
+              <option value="America/Chicago">America/Chicago</option>
+              <option value="UTC">UTC</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">Session start</span>
+            <input className="field-input" value={sessionStart} onChange={(event) => setSessionStart(event.target.value)} />
+          </label>
+          <label className="field">
+            <span className="field-label">Session end</span>
+            <input className="field-input" value={sessionEnd} onChange={(event) => setSessionEnd(event.target.value)} />
+          </label>
+          <label className="field checkbox-field">
+            <input checked={rthOnly} type="checkbox" onChange={(event) => setRthOnly(event.target.checked)} />
+            <span className="field-label">RTH only</span>
           </label>
           <label className="field">
             <span className="field-label">Split run</span>
@@ -197,9 +286,6 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             </label>
           ) : null}
         </div>
-        {splitEnabled ? (
-          <p className="microcopy">Leave split time blank to split the selected window at its midpoint.</p>
-        ) : null}
         <div className="action-row">
           <button
             className="primary-button"
@@ -210,6 +296,9 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             {createJobMutation.isPending ? "Submitting…" : "Run backtest"}
           </button>
         </div>
+        {splitEnabled ? (
+          <p className="microcopy">Leave split time blank to split the selected window at its midpoint.</p>
+        ) : null}
         {createJobMutation.isError ? <p className="error-copy">{createJobMutation.error.message}</p> : null}
         {latestJobSummary ? (
           <div className="job-card">
@@ -234,12 +323,44 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             <p className="eyebrow">Runs</p>
             <h2>Recent backtest runs</h2>
           </div>
-          <span className="pill">{runsQuery.data?.runs.length ?? 0} runs</span>
+          <span className="pill">{filteredRuns.length} visible</span>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span className="field-label">Status</span>
+            <select className="field-input" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="completed">Completed</option>
+              <option value="running">Running</option>
+              <option value="failed">Failed</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">Segment</span>
+            <select className="field-input" value={segmentFilter} onChange={(event) => setSegmentFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="none">Unsplit</option>
+              <option value="is">IS</option>
+              <option value="oos">OOS</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">Search</span>
+            <input className="field-input" value={runSearch} onChange={(event) => setRunSearch(event.target.value)} />
+          </label>
+          <label className="field checkbox-field">
+            <input
+              checked={currentSymbolOnly}
+              type="checkbox"
+              onChange={(event) => setCurrentSymbolOnly(event.target.checked)}
+            />
+            <span className="field-label">Current symbol only</span>
+          </label>
         </div>
         {runsQuery.isLoading ? <p>Loading runs…</p> : null}
         {runsQuery.isError ? <p className="error-copy">{runsQuery.error.message}</p> : null}
         <div className="stack">
-          {runsQuery.data?.runs.map((run) => (
+          {filteredRuns.map((run) => (
             <button
               className={selectedRunId === run.id ? "nav-button active" : "nav-button"}
               key={run.id}
@@ -251,13 +372,16 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
                 <span className={`status-badge status-${run.status}`}>{run.status}</span>
               </div>
               <span className="microcopy">
-                {run.strategy_id}
+                {typeof run.params_json.symbol_contract === "string" ? run.params_json.symbol_contract : run.strategy_id}
                 {readRunSegment(run) ? ` • ${readRunSegment(run)?.toUpperCase()}` : ""}
                 {" • "}
                 {new Date(run.updated_at).toLocaleString()}
               </span>
             </button>
           ))}
+          {!runsQuery.isLoading && filteredRuns.length === 0 ? (
+            <p className="microcopy">No runs match the current filters.</p>
+          ) : null}
         </div>
       </article>
 
@@ -270,45 +394,56 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
           <span className="pill">{analyticsQuery.data?.analytics.trades ?? 0} trades</span>
         </div>
         {selectedRun ? (
-          <div className="detail-grid">
-            <div className="detail-card">
-              <span className="metric-label">Window</span>
-              <strong>
-                {formatMaybeDate(selectedParams.start)} to {formatMaybeDate(selectedParams.end)}
-              </strong>
-              <p className="microcopy">
-                {String(selectedParams.timeframe ?? "1m")} bars • IB {String(selectedParams.ib_minutes ?? "15")}m •{" "}
-                {String(selectedParams.entry_mode ?? "first_outside")}
-              </p>
+          <>
+            <div className="inline-actions">
+              <button className="secondary-button" onClick={applySelectedRunParams} type="button">
+                Load selected run into form
+              </button>
+              {selectedSymbolFromRun && selectedSymbolFromRun !== selectedSymbol ? (
+                <span className="microcopy">Run symbol: {selectedSymbolFromRun}</span>
+              ) : null}
             </div>
-            <div className="detail-card">
-              <span className="metric-label">Risk model</span>
-              <strong>{String(selectedParams.stop_mode ?? "or_boundary")}</strong>
-              <p className="microcopy">
-                TP {formatMaybeNumber(selectedParams.tp_r_multiple)}R • {String(selectedParams.contracts ?? 1)} contract(s)
-              </p>
-            </div>
-            <div className="detail-card">
-              <span className="metric-label">Session</span>
-              <strong>{String(selectedParams.timezone ?? "UTC")}</strong>
-              <p className="microcopy">
-                {String(selectedParams.session_start ?? "09:30:00")} to {String(selectedParams.session_end ?? "16:00:00")}
-              </p>
-            </div>
-            {splitMeta ? (
+            <div className="detail-grid">
               <div className="detail-card">
-                <span className="metric-label">Split</span>
-                <strong>{String(splitMeta.segment ?? "segment").toUpperCase()}</strong>
+                <span className="metric-label">Window</span>
+                <strong>
+                  {formatMaybeDate(selectedParams.start)} to {formatMaybeDate(selectedParams.end)}
+                </strong>
                 <p className="microcopy">
-                  Split at {formatMaybeDate(splitMeta.split_at)}
-                  {splitMeta.group_id ? ` • ${String(splitMeta.group_id)}` : ""}
+                  {String(selectedParams.timeframe ?? "1m")} bars • IB {String(selectedParams.ib_minutes ?? "15")}m
                 </p>
               </div>
-            ) : null}
-          </div>
+              <div className="detail-card">
+                <span className="metric-label">Risk model</span>
+                <strong>{String(selectedParams.stop_mode ?? "or_boundary")}</strong>
+                <p className="microcopy">
+                  TP {formatMaybeNumber(selectedParams.tp_r_multiple)}R • {String(selectedParams.contracts ?? 1)} contract(s)
+                </p>
+              </div>
+              <div className="detail-card">
+                <span className="metric-label">Session</span>
+                <strong>{String(selectedParams.timezone ?? "UTC")}</strong>
+                <p className="microcopy">
+                  {String(selectedParams.session_start ?? "09:30:00")} to {String(selectedParams.session_end ?? "16:00:00")}
+                  {" • "}
+                  {selectedParams.rth_only === false ? "All sessions" : "RTH only"}
+                </p>
+              </div>
+              {splitMeta ? (
+                <div className="detail-card">
+                  <span className="metric-label">Split</span>
+                  <strong>{String(splitMeta.segment ?? "segment").toUpperCase()}</strong>
+                  <p className="microcopy">
+                    Split at {formatMaybeDate(splitMeta.split_at)}
+                    {splitMeta.group_id ? ` • ${String(splitMeta.group_id)}` : ""}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          </>
         ) : null}
         {analyticsQuery.data ? (
-          <div className="metric-grid">
+          <div className="metric-grid backtest-metrics-grid">
             <div>
               <span className="metric-label">Total PnL</span>
               <strong>{analyticsQuery.data.analytics.total_pnl.toFixed(2)}</strong>
@@ -318,8 +453,18 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
               <strong>{analyticsQuery.data.analytics.avg_pnl.toFixed(2)}</strong>
             </div>
             <div>
-              <span className="metric-label">Wins</span>
-              <strong>{analyticsQuery.data.analytics.wins}</strong>
+              <span className="metric-label">Wins / losses</span>
+              <strong>
+                {analyticsQuery.data.analytics.wins} / {analyticsQuery.data.analytics.losses}
+              </strong>
+            </div>
+            <div>
+              <span className="metric-label">Win rate</span>
+              <strong>{formatPercent(selectedMetrics.win_rate)}</strong>
+            </div>
+            <div>
+              <span className="metric-label">Total R</span>
+              <strong>{formatMaybeNumber(selectedMetrics.total_r)}</strong>
             </div>
             <div>
               <span className="metric-label">Max DD</span>
@@ -327,21 +472,43 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             </div>
           </div>
         ) : null}
-        {selectedRun ? <pre className="json-card compact-card">{JSON.stringify(selectedRun.metrics_json, null, 2)}</pre> : null}
-        <div className="stack">
-          {tradesQuery.data?.trades.map((trade) => (
-            <div className="job-card" key={trade.id}>
-              <div className="profile-header">
-                <strong>{trade.symbol_contract}</strong>
-                <span>{trade.pnl?.toFixed(2) ?? "0.00"}</span>
-              </div>
-              <p className="microcopy">
-                {trade.entry_ts ? new Date(trade.entry_ts).toLocaleString() : "n/a"} to{" "}
-                {trade.exit_ts ? new Date(trade.exit_ts).toLocaleString() : "n/a"}
-              </p>
-              <pre className="json-card compact-card">{JSON.stringify(trade.notes_json, null, 2)}</pre>
-            </div>
-          ))}
+        {selectedRun ? (
+          <details className="detail-disclosure">
+            <summary>Run metrics JSON</summary>
+            <pre className="json-card compact-card">{JSON.stringify(selectedRun.metrics_json, null, 2)}</pre>
+          </details>
+        ) : null}
+        <div className="table-card">
+          <table className="trade-table">
+            <thead>
+              <tr>
+                <th>Side</th>
+                <th>Entry</th>
+                <th>Exit</th>
+                <th>Qty</th>
+                <th>PnL</th>
+                <th>Exit reason</th>
+                <th>R</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tradesQuery.data?.trades.map((trade) => {
+                const notes = asRecord(trade.notes_json);
+                return (
+                  <tr key={trade.id}>
+                    <td>{typeof notes?.side === "string" ? notes.side : "n/a"}</td>
+                    <td>{trade.entry_ts ? new Date(trade.entry_ts).toLocaleString() : "n/a"}</td>
+                    <td>{trade.exit_ts ? new Date(trade.exit_ts).toLocaleString() : "n/a"}</td>
+                    <td>{trade.qty?.toFixed(0) ?? "n/a"}</td>
+                    <td>{trade.pnl?.toFixed(2) ?? "0.00"}</td>
+                    <td>{typeof notes?.exit_reason === "string" ? notes.exit_reason : "n/a"}</td>
+                    <td>{typeof notes?.r_multiple === "number" ? notes.r_multiple.toFixed(2) : "n/a"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {!tradesQuery.data?.trades.length ? <p className="microcopy">No trades recorded for this run.</p> : null}
         </div>
       </article>
     </section>
@@ -401,4 +568,26 @@ function formatMaybeDate(value: unknown) {
 
 function formatMaybeNumber(value: unknown) {
   return typeof value === "number" ? value.toFixed(2) : String(value ?? "n/a");
+}
+
+function formatPercent(value: unknown) {
+  return typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "n/a";
+}
+
+function toDatetimeLocalValue(value: unknown) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  const hours = String(parsed.getHours()).padStart(2, "0");
+  const minutes = String(parsed.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
 }

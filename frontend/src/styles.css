@@ -311,6 +311,13 @@ button {
   margin-top: 12px;
 }
 
+.inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
 .status-badge {
   padding: 6px 10px;
   border-radius: 999px;
@@ -336,6 +343,54 @@ button {
   background: #ebc0b6;
 }
 
+.backtest-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.detail-disclosure {
+  margin-top: 16px;
+}
+
+.detail-disclosure summary {
+  cursor: pointer;
+  color: #433525;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.table-card {
+  margin-top: 16px;
+  overflow-x: auto;
+  border-radius: 18px;
+  background: rgba(227, 216, 198, 0.55);
+  padding: 12px;
+}
+
+.trade-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.trade-table th,
+.trade-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(67, 53, 37, 0.1);
+}
+
+.trade-table th {
+  color: #7a6447;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.trade-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -348,5 +403,10 @@ button {
 
   .content {
     padding: 20px;
+  }
+
+  .inline-actions {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
