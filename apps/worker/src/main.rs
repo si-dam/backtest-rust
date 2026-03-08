@@ -1,7 +1,11 @@
 use std::{fs::File, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use app_core::{config::Settings, telemetry::init_tracing};
+use app_core::{
+    config::Settings,
+    runtime::{prepare_runtime_directories, shutdown_signal},
+    telemetry::init_tracing,
+};
 use arrow_array::{
     ArrayRef, BooleanArray, Float64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
     UInt64Array,
@@ -71,6 +75,7 @@ struct FlatPresetProfileRow {
 async fn main() -> Result<()> {
     let settings = Settings::from_env()?;
     init_tracing(&settings);
+    prepare_runtime_directories(&settings, true).await?;
 
     let pool = PgPoolOptions::new()
         .max_connections(4)
@@ -81,42 +86,72 @@ async fn main() -> Result<()> {
     let backtests = PgBacktestStore::new(pool);
     let worker_id = format!("runtime-worker-{}", std::process::id());
     let poll_interval = Duration::from_millis(settings.worker_poll_interval_ms);
+    let shutdown = shutdown_signal("runtime-worker");
+    tokio::pin!(shutdown);
 
     tracing::info!(worker_id = %worker_id, "runtime-worker started");
 
     loop {
-        if let Some(job) = jobs.claim_next_job(&worker_id, 30).await? {
-            tracing::info!(job_id = %job.id, job_type = %job.job_type, "claimed job");
-            jobs.update_progress(
-                job.id,
-                &worker_id,
-                30,
-                JobProgressUpdate {
-                    stage: "dispatching".to_string(),
-                    detail_json: json!({ "job_type": job.job_type, "attempt": job.attempt }),
-                },
-            )
-            .await?;
-            let result = dispatch_job(
-                &settings,
-                &jobs,
-                &market,
-                &backtests,
-                job.id,
-                &worker_id,
-                &job.job_type,
-                &job.payload_json,
-            )
-            .await;
-            match result {
-                Ok(summary) => jobs.complete_job(job.id, summary).await?,
-                Err(error) => jobs.fail_job(job.id, &error).await?,
+        tokio::select! {
+            _ = &mut shutdown => {
+                tracing::info!(worker_id = %worker_id, "runtime-worker stopping");
+                break;
             }
-            continue;
-        }
+            claimed = jobs.claim_next_job(&worker_id, 30) => {
+                if let Some(job) = claimed? {
+                    let started = std::time::Instant::now();
+                    tracing::info!(job_id = %job.id, job_type = %job.job_type, "claimed job");
+                    jobs.update_progress(
+                        job.id,
+                        &worker_id,
+                        30,
+                        JobProgressUpdate {
+                            stage: "dispatching".to_string(),
+                            detail_json: json!({ "job_type": job.job_type, "attempt": job.attempt }),
+                        },
+                    )
+                    .await?;
+                    let result = dispatch_job(
+                        &settings,
+                        &jobs,
+                        &market,
+                        &backtests,
+                        job.id,
+                        &worker_id,
+                        &job.job_type,
+                        &job.payload_json,
+                    )
+                    .await;
+                    match result {
+                        Ok(summary) => {
+                            tracing::info!(
+                                job_id = %job.id,
+                                job_type = %job.job_type,
+                                elapsed_ms = started.elapsed().as_millis(),
+                                "job completed"
+                            );
+                            jobs.complete_job(job.id, summary).await?
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                job_id = %job.id,
+                                job_type = %job.job_type,
+                                elapsed_ms = started.elapsed().as_millis(),
+                                error = %error,
+                                "job failed"
+                            );
+                            jobs.fail_job(job.id, &error).await?
+                        }
+                    }
+                    continue;
+                }
 
-        sleep(poll_interval).await;
+                sleep(poll_interval).await;
+            }
+        }
     }
+
+    Ok(())
 }
 
 async fn dispatch_job(

@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+app-core.workspace = true
 backtest.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true

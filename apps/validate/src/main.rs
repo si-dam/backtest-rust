@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
+use app_core::{config::Settings, telemetry::init_tracing};
 use backtest::{merge_orb_params, simulate_orb_breakout_strategy, summarize_breakout_trades, StrategyBar};
 use chrono_tz::Tz;
 use market::{
@@ -17,6 +18,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 fn main() -> Result<()> {
+    if let Ok(settings) = Settings::from_env() {
+        init_tracing(&settings);
+    }
     let options = Options::parse(env::args().skip(1).collect())?;
     let started = Instant::now();
     let parse_started = Instant::now();

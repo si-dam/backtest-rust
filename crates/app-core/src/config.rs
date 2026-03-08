@@ -3,6 +3,12 @@ use std::{env, net::SocketAddr, path::PathBuf};
 use anyhow::{Context, Result};
 use chrono_tz::Tz;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogFormat {
+    Plain,
+    Json,
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub app_name: String,
@@ -18,6 +24,7 @@ pub struct Settings {
     pub dataset_timezone: Tz,
     pub worker_poll_interval_ms: u64,
     pub rust_log: String,
+    pub log_format: LogFormat,
 }
 
 impl Settings {
@@ -38,6 +45,7 @@ impl Settings {
                 .with_context(|| "invalid DATASET_TIMEZONE")?,
             worker_poll_interval_ms: env_u64("WORKER_POLL_INTERVAL_MS", 1_500)?,
             rust_log: env_var("RUST_LOG", "info"),
+            log_format: env_var("LOG_FORMAT", "plain").parse()?,
         })
     }
 
@@ -45,6 +53,18 @@ impl Settings {
         format!("{}:{}", self.app_host, self.app_port)
             .parse()
             .with_context(|| format!("invalid socket address {}:{}", self.app_host, self.app_port))
+    }
+}
+
+impl std::str::FromStr for LogFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "plain" => Ok(Self::Plain),
+            "json" => Ok(Self::Json),
+            other => anyhow::bail!("invalid LOG_FORMAT: {other} (expected plain or json)"),
+        }
     }
 }
 

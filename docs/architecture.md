@@ -31,6 +31,10 @@
   - `/health` for process liveness
   - `/ready` for dependency readiness against Postgres and ClickHouse
   - `x-request-id` response headers for request tracing
+- shared runtime behavior now also includes:
+  - startup directory preparation for `INGEST_ROOT` and `ARTIFACT_ROOT`
+  - graceful shutdown on `CTRL+C` and `SIGTERM`
+  - configurable plain versus JSON log formatting through `LOG_FORMAT`
 - Derived jobs materialize:
   - time bars into `bars_time`
   - non-time bars into `bars_non_time`

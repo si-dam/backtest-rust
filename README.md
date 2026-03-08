@@ -43,6 +43,9 @@ API liveness and readiness endpoints are separate:
 - `GET /health` checks process liveness
 - `GET /ready` checks Postgres and ClickHouse connectivity
 - all API responses now include `x-request-id`
+- `LOG_FORMAT=plain|json` controls human-readable versus structured JSON logs
+
+Runtime startup now prepares `INGEST_ROOT` and `ARTIFACT_ROOT` automatically, and the API plus worker both shut down gracefully on `CTRL+C` or `SIGTERM`.
 
 For local parity/performance checks on real files without a running DB, use `runtime-validate`. Example:
 
