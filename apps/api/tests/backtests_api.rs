@@ -79,6 +79,7 @@ async fn create_backtest_job_enqueues_runtime_job() -> Result<()> {
 
     let response = app.oneshot(request).await?;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(response.headers().contains_key("x-request-id"));
     let body = json_body(response).await?;
     let job_id = serde_json::from_value::<Uuid>(body["job_id"].clone())?;
 
@@ -102,6 +103,7 @@ async fn list_backtest_strategies_returns_orb_metadata() -> Result<()> {
         .oneshot(Request::builder().uri("/api/v1/backtests/strategies").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().contains_key("x-request-id"));
 
     let body = json_body(response).await?;
     let strategies = body.as_array().expect("strategies response should be an array");

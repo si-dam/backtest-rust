@@ -40,6 +40,15 @@ impl ClickHouseMarketStore {
         Self { client }
     }
 
+    pub async fn ping(&self) -> Result<(), ApiError> {
+        self.client
+            .query("SELECT 1 AS value")
+            .fetch_one::<ClickHousePingRow>()
+            .await
+            .map(|_| ())
+            .map_err(map_clickhouse_err)
+    }
+
     pub async fn list_symbols(&self) -> Result<Vec<SymbolRecord>, ApiError> {
         self.client
             .query(
@@ -1314,6 +1323,12 @@ fn default_large_orders_threshold() -> f64 {
 
 fn default_large_orders_limit() -> u32 {
     DEFAULT_LARGE_ORDERS_LIMIT
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Row)]
+struct ClickHousePingRow {
+    value: u8,
 }
 
 fn default_metric() -> String {

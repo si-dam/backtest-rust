@@ -7,7 +7,8 @@ use app_core::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderName, HeaderValue, Request, StatusCode},
+    middleware::{self, Next},
     response::Response,
     routing::{get, post},
     Json, Router,
@@ -80,6 +81,12 @@ struct HealthResponse {
     service: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    checks: Value,
+}
+
 pub async fn build_router(settings: Settings) -> Result<Router> {
     let pool = PgPoolOptions::new()
         .max_connections(8)
@@ -118,7 +125,9 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
 
     Ok(Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .nest("/api/v1", api_v1)
+        .layer(middleware::from_fn(attach_request_id))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state))
@@ -129,6 +138,56 @@ async fn health() -> Json<HealthResponse> {
         status: "ok",
         service: "runtime-api",
     })
+}
+
+async fn ready(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
+    let postgres = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(state.jobs.pool())
+        .await
+        .map(|_| json!({ "status": "ok" }))
+        .unwrap_or_else(|error| json!({ "status": "error", "message": error.to_string() }));
+    let clickhouse = state
+        .market
+        .ping()
+        .await
+        .map(|_| json!({ "status": "ok" }))
+        .unwrap_or_else(|error| json!({ "status": "error", "message": error.to_string() }));
+
+    let ready = postgres["status"] == "ok" && clickhouse["status"] == "ok";
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(ReadinessResponse {
+            status: if ready { "ok" } else { "degraded" },
+            checks: json!({
+                "postgres": postgres,
+                "clickhouse": clickhouse,
+            }),
+        }),
+    )
+}
+
+async fn attach_request_id(request: Request<axum::body::Body>, next: Next) -> Response {
+    let request_id = request
+        .headers()
+        .get(request_id_header_name())
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let mut response = next.run(request).await;
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response
+            .headers_mut()
+            .insert(request_id_header_name(), value);
+    }
+    response
 }
 
 async fn create_ingestion_job(
@@ -510,6 +569,10 @@ async fn list_dataset_exports(
 
 fn default_rebuild_target() -> String {
     "all".to_string()
+}
+
+fn request_id_header_name() -> HeaderName {
+    HeaderName::from_static("x-request-id")
 }
 
 fn encode_backtest_trades_csv(trades: &[BacktestTradeRecord]) -> anyhow::Result<String> {

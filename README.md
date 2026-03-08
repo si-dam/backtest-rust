@@ -38,6 +38,11 @@ The imported Python application is preserved under `reference/backtest/` as the 
 
 This repo does not assume a local Docker stack. Postgres and ClickHouse can be attached later from whatever local or remote instances you prefer.
 
+API liveness and readiness endpoints are separate:
+- `GET /health` checks process liveness
+- `GET /ready` checks Postgres and ClickHouse connectivity
+- all API responses now include `x-request-id`
+
 ## Current state
 
 This repo now contains the phase-1 foundation and an in-progress phase-2 market-data slice:
