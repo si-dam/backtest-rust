@@ -10,10 +10,16 @@ const ALLOWED_TIMEFRAMES: &[&str] = &["1m", "3m", "5m", "15m", "30m", "60m"];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BacktestJobRequest {
+    #[serde(default = "default_backtest_mode")]
+    pub mode: String,
     pub name: String,
     pub strategy_id: String,
     #[serde(default)]
     pub params: Value,
+}
+
+fn default_backtest_mode() -> String {
+    "run".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, sqlx::FromRow)]

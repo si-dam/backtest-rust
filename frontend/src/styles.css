@@ -165,6 +165,10 @@ button {
   gap: 8px;
 }
 
+.field-wide {
+  grid-column: 1 / -1;
+}
+
 .checkbox-field {
   align-content: end;
   justify-items: start;

@@ -204,6 +204,7 @@ export function createIngestionJob(payload: {
 }
 
 export function createBacktestJob(payload: {
+  mode?: "run" | "sweep";
   name: string;
   strategy_id: string;
   params: Record<string, unknown>;

@@ -47,10 +47,11 @@
   - operators can queue derived rebuild jobs with `POST /api/v1/markets/:symbol/rebuild/jobs`
   - rebuild jobs can target bars, profiles, or large-order overlays independently
 - The first strategy path now exists in Rust:
-  - `POST /api/v1/backtests/jobs` can queue `orb_breakout_v1`
+  - `POST /api/v1/backtests/jobs` can queue `orb_breakout_v1` in either `run` or `sweep` mode
   - `GET /api/v1/backtests/strategies` exposes runtime strategy metadata and defaults
   - `runtime-worker` loads persisted time bars from ClickHouse and runs the ORB engine in `crates/backtest`
   - a single ORB job can optionally split the requested window into `[IS]` and `[OOS]` runs with shared split metadata
+  - sweep jobs can fan one ORB configuration across multiple symbols and optional period windows while returning one job result summary
   - run metadata and trades persist to Postgres and are exposed through `/api/v1/backtests/runs/*`
   - run config and trade exports are exposed through `/api/v1/backtests/runs/{id}/export/config.json` and `/api/v1/backtests/runs/{id}/export/trades.csv`
   - `crates/backtest/tests/fixtures/` contains reference-style ORB cases used to keep the Rust implementation aligned with the Python behavior

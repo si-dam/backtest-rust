@@ -19,6 +19,7 @@ interface BacktestsPanelProps {
 }
 
 export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) {
+  const [mode, setMode] = useState<"run" | "sweep">("run");
   const [name, setName] = useState("ORB Breakout V1");
   const [lookbackDays, setLookbackDays] = useState("5");
   const [timeframe, setTimeframe] = useState("1m");
@@ -33,6 +34,7 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
   const [rthOnly, setRthOnly] = useState(true);
   const [splitEnabled, setSplitEnabled] = useState(false);
   const [splitAt, setSplitAt] = useState("");
+  const [sweepSymbols, setSweepSymbols] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [segmentFilter, setSegmentFilter] = useState("all");
   const [runSearch, setRunSearch] = useState("");
@@ -91,6 +93,7 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
           : new Date(start.getTime() + Math.floor((end.getTime() - start.getTime()) / 2));
 
       return createBacktestJob({
+        mode,
         name,
         strategy_id: "orb_breakout_v1",
         params: {
@@ -112,6 +115,13 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
                 split: {
                   enabled: true,
                   split_at: resolvedSplitAt.toISOString(),
+                },
+              }
+            : {}),
+          ...(mode === "sweep"
+            ? {
+                batch: {
+                  symbols: parseSweepSymbols(sweepSymbols, selectedSymbol),
                 },
               }
             : {}),
@@ -185,6 +195,12 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
     setSessionStart(typeof params.session_start === "string" ? params.session_start : "09:30:00");
     setSessionEnd(typeof params.session_end === "string" ? params.session_end : "16:00:00");
     setRthOnly(typeof params.rth_only === "boolean" ? params.rth_only : true);
+    const batch = asRecord(params.batch);
+    const batchSymbols = Array.isArray(batch?.symbols)
+      ? batch.symbols.filter((value): value is string => typeof value === "string")
+      : [];
+    setMode(batchSymbols.length > 0 ? "sweep" : "run");
+    setSweepSymbols(batchSymbols.join(", "));
 
     const split = asRecord(params.split);
     const enabled = split?.enabled === true;
@@ -198,11 +214,18 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
         <div className="panel-header">
           <div>
             <p className="eyebrow">Backtests</p>
-            <h2>Submit ORB breakout runs</h2>
+            <h2>Submit ORB breakout jobs</h2>
           </div>
           <span className="pill">{selectedSymbol || "No symbol"}</span>
         </div>
         <div className="form-grid">
+          <label className="field">
+            <span className="field-label">Mode</span>
+            <select className="field-input" value={mode} onChange={(event) => setMode(event.target.value as "run" | "sweep")}>
+              <option value="run">Single run</option>
+              <option value="sweep">Symbol sweep</option>
+            </select>
+          </label>
           <label className="field">
             <span className="field-label">Run name</span>
             <input className="field-input" value={name} onChange={(event) => setName(event.target.value)} />
@@ -295,6 +318,17 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
               />
             </label>
           ) : null}
+          {mode === "sweep" ? (
+            <label className="field field-wide">
+              <span className="field-label">Sweep symbols</span>
+              <input
+                className="field-input"
+                placeholder={selectedSymbol ? `${selectedSymbol}, ESM6, RTYM6` : "NQM6, ESM6, RTYM6"}
+                value={sweepSymbols}
+                onChange={(event) => setSweepSymbols(event.target.value)}
+              />
+            </label>
+          ) : null}
         </div>
         <div className="action-row">
           <button
@@ -303,11 +337,14 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             onClick={() => createJobMutation.mutate()}
             type="button"
           >
-            {createJobMutation.isPending ? "Submitting…" : "Run backtest"}
+            {createJobMutation.isPending ? "Submitting…" : mode === "sweep" ? "Run sweep" : "Run backtest"}
           </button>
         </div>
         {splitEnabled ? (
           <p className="microcopy">Leave split time blank to split the selected window at its midpoint.</p>
+        ) : null}
+        {mode === "sweep" ? (
+          <p className="microcopy">Sweep uses the current date window for each symbol. Leave the field blank to sweep the selected symbol only.</p>
         ) : null}
         {activeStrategy ? <p className="microcopy">{activeStrategy.description}</p> : null}
         {createJobMutation.isError ? <p className="error-copy">{createJobMutation.error.message}</p> : null}
@@ -319,6 +356,7 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
             </div>
             <p className="microcopy">
               {latestJobSummary.createdRuns} run(s), {latestJobSummary.tradeCount} trade(s)
+              {latestJobSummary.failedRuns ? `, ${latestJobSummary.failedRuns} failed` : ""}
               {latestJobSummary.splitGroupId ? `, split group ${latestJobSummary.splitGroupId}` : ""}
             </p>
             {latestJobSummary.runIds.length > 0 ? (
@@ -550,6 +588,7 @@ function summarizeJobResult(job?: JobRecord | null) {
 
   return {
     createdRuns: numberOrFallback(result.created_runs, 0),
+    failedRuns: numberOrFallback(result.failed_runs, 0),
     tradeCount: numberOrFallback(result.trade_count, 0),
     splitGroupId: typeof result.split_group_id === "string" ? result.split_group_id : null,
     runIds: readRunIds(result.run_ids),
@@ -617,4 +656,15 @@ function toDatetimeLocalValue(value: unknown) {
   const hours = String(parsed.getHours()).padStart(2, "0");
   const minutes = String(parsed.getMinutes()).padStart(2, "0");
   return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function parseSweepSymbols(raw: string, selectedSymbol: string) {
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  if (values.length > 0) {
+    return values;
+  }
+  return selectedSymbol ? [selectedSymbol] : [];
 }

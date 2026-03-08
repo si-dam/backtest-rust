@@ -419,6 +419,10 @@ async fn create_backtest_job(
     State(state): State<AppState>,
     Json(payload): Json<BacktestJobRequest>,
 ) -> ApiResult<(StatusCode, Json<JobSubmitted>)> {
+    if !matches!(payload.mode.as_str(), "run" | "sweep") {
+        return Err(ApiError::bad_request("mode must be run or sweep"));
+    }
+
     let job = state
         .jobs
         .create_job(CreateJobInput {

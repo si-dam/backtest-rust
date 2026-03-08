@@ -93,6 +93,48 @@ async fn create_backtest_job_enqueues_runtime_job() -> Result<()> {
 }
 
 #[tokio::test]
+async fn create_backtest_sweep_job_enqueues_runtime_job() -> Result<()> {
+    let Some((pool, settings)) = test_pool_and_settings().await? else {
+        return Ok(());
+    };
+
+    let app = build_router(settings).await?;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/backtests/jobs")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "mode": "sweep",
+                "name": format!("API Sweep {}", Uuid::new_v4()),
+                "strategy_id": "orb_breakout_v1",
+                "params": {
+                    "symbol_contract": "NQM6",
+                    "start": "2026-02-18T14:30:00Z",
+                    "end": "2026-02-18T21:00:00Z",
+                    "batch": {
+                        "symbols": ["NQM6", "ESM6"]
+                    }
+                }
+            })
+            .to_string(),
+        ))?;
+
+    let response = app.oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = json_body(response).await?;
+    let job_id = serde_json::from_value::<Uuid>(body["job_id"].clone())?;
+
+    let jobs = PgJobStore::new(pool);
+    let job = jobs.get_job(job_id).await?.expect("job should exist");
+    assert_eq!(job.job_type, JobType::BacktestRun.as_str());
+    assert_eq!(job.payload_json["mode"], "sweep");
+    assert_eq!(job.payload_json["strategy_id"], "orb_breakout_v1");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn list_backtest_strategies_returns_orb_metadata() -> Result<()> {
     let Some((_pool, settings)) = test_pool_and_settings().await? else {
         return Ok(());

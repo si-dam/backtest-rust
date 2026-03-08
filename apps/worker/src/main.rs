@@ -35,6 +35,13 @@ struct OrbRunSegment {
     split_meta: Option<Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OrbSweepPeriod {
+    label: String,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug)]
 struct FlatPresetProfileRow {
     profile_id: String,
@@ -629,15 +636,61 @@ async fn handle_backtest_run(
         .and_then(Value::as_str)
         .unwrap_or("ORB Backtest")
         .to_string();
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("run");
     let strategy_id = payload
         .get("strategy_id")
         .and_then(Value::as_str)
         .unwrap_or("scaffold");
+    if !matches!(mode, "run" | "sweep") {
+        return Err(format!("unsupported backtest mode: {mode}"));
+    }
     if strategy_id != "orb_breakout_v1" {
         return Err(format!("unsupported strategy_id: {strategy_id}"));
     }
 
     let params = payload.get("params").cloned().unwrap_or_else(|| json!({}));
+    if mode == "sweep" {
+        return run_orb_sweep(
+            settings,
+            jobs,
+            market,
+            backtests,
+            job_id,
+            worker_id,
+            &name,
+            strategy_id,
+            &params,
+        )
+        .await;
+    }
+
+    run_orb_single(
+        settings,
+        jobs,
+        market,
+        backtests,
+        job_id,
+        worker_id,
+        &name,
+        strategy_id,
+        &params,
+        None,
+    )
+    .await
+}
+
+async fn run_orb_single(
+    settings: &Settings,
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    backtests: &PgBacktestStore,
+    job_id: Uuid,
+    worker_id: &str,
+    name: &str,
+    strategy_id: &str,
+    params: &Value,
+    batch_meta: Option<Value>,
+) -> std::result::Result<Value, String> {
     let orb_params = merge_orb_params(&params, settings.dataset_timezone)
         .map_err(|error| format!("invalid ORB params: {error}"))?;
     let split_config = parse_orb_split_config(&params, orb_params.start, orb_params.end)
@@ -658,6 +711,7 @@ async fn handle_backtest_run(
             "strategy_id": strategy_id,
             "symbol_contract": orb_params.symbol_contract,
             "segments": segments.len(),
+            "batch": batch_meta,
         }),
     )
     .await?;
@@ -673,8 +727,9 @@ async fn handle_backtest_run(
         let run_name = segment
             .label
             .map(|label| format!("{name} [{}]", label.to_uppercase()))
-            .unwrap_or_else(|| name.clone());
-        let params_json = params_json_for_segment(&segment_params, segment.split_meta.clone());
+            .unwrap_or_else(|| name.to_string());
+        let params_json =
+            params_json_for_segment(&segment_params, segment.split_meta.clone(), batch_meta.clone());
 
         let run = backtests
             .create_run(NewRunInput {
@@ -696,6 +751,7 @@ async fn handle_backtest_run(
             run.id,
             segment_params,
             segment.label,
+            batch_meta.as_ref(),
         )
         .await;
         if let Err(error) = &result {
@@ -729,6 +785,98 @@ async fn handle_backtest_run(
     Ok(response)
 }
 
+async fn run_orb_sweep(
+    settings: &Settings,
+    jobs: &PgJobStore,
+    market: &ClickHouseMarketStore,
+    backtests: &PgBacktestStore,
+    job_id: Uuid,
+    worker_id: &str,
+    name: &str,
+    strategy_id: &str,
+    params: &Value,
+) -> std::result::Result<Value, String> {
+    let symbols = sweep_symbols(params)?;
+    let periods = sweep_periods(params)?;
+
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "creating_backtest_sweep",
+        json!({
+            "strategy_id": strategy_id,
+            "symbol_count": symbols.len(),
+            "period_count": periods.len(),
+        }),
+    )
+    .await?;
+
+    let mut created_run_ids = Vec::new();
+    let mut total_trades = 0usize;
+    let mut failures = Vec::new();
+
+    for symbol_contract in &symbols {
+        for period in &periods {
+            let run_name = format!("{name} | {symbol_contract} | {}", period.label);
+            let run_params = params_for_sweep_member(params, symbol_contract, period);
+            let batch_meta = json!({
+                "symbol_contract": symbol_contract,
+                "period_label": period.label,
+                "period_start": period.start,
+                "period_end": period.end,
+            });
+
+            match run_orb_single(
+                settings,
+                jobs,
+                market,
+                backtests,
+                job_id,
+                worker_id,
+                &run_name,
+                strategy_id,
+                &run_params,
+                Some(batch_meta.clone()),
+            )
+            .await
+            {
+                Ok(result) => {
+                    created_run_ids.extend(read_run_ids(result.get("run_ids")));
+                    total_trades += result
+                        .get("trade_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default() as usize;
+                }
+                Err(error) => failures.push(json!({
+                    "symbol_contract": symbol_contract,
+                    "period_label": period.label,
+                    "error": error,
+                })),
+            }
+        }
+    }
+
+    if created_run_ids.is_empty() && !failures.is_empty() {
+        let first_error = failures[0]
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown sweep error");
+        return Err(format!("sweep produced no runs: {first_error}"));
+    }
+
+    Ok(json!({
+        "run_id": created_run_ids.first(),
+        "run_ids": created_run_ids,
+        "mode": "sweep",
+        "strategy_id": strategy_id,
+        "trade_count": total_trades,
+        "created_runs": created_run_ids.len(),
+        "failed_runs": failures.len(),
+        "failures": failures,
+    }))
+}
+
 async fn run_orb_backtest(
     settings: &Settings,
     jobs: &PgJobStore,
@@ -739,6 +887,7 @@ async fn run_orb_backtest(
     run_id: Uuid,
     params: backtest::OrbStrategyParams,
     segment_label: Option<&str>,
+    batch_meta: Option<&Value>,
 ) -> std::result::Result<OrbRunSummary, String> {
     update_stage(
         jobs,
@@ -787,6 +936,12 @@ async fn run_orb_backtest(
             .expect("backtest metrics should be an object")
             .insert("segment".to_string(), json!(segment));
     }
+    if let Some(batch_meta) = batch_meta {
+        metrics
+            .as_object_mut()
+            .expect("backtest metrics should be an object")
+            .insert("batch".to_string(), batch_meta.clone());
+    }
     let mut trade_records = build_trade_records(run_id, &params, &trades);
     if let Some(segment) = segment_label {
         for trade in &mut trade_records {
@@ -795,6 +950,15 @@ async fn run_orb_backtest(
                 .as_object_mut()
                 .expect("trade notes should be an object")
                 .insert("segment".to_string(), json!(segment));
+        }
+    }
+    if let Some(batch_meta) = batch_meta {
+        for trade in &mut trade_records {
+            trade
+                .notes_json
+                .as_object_mut()
+                .expect("trade notes should be an object")
+                .insert("batch".to_string(), batch_meta.clone());
         }
     }
 
@@ -865,6 +1029,7 @@ fn orb_segments(
 fn params_json_for_segment(
     params: &backtest::OrbStrategyParams,
     split_meta: Option<Value>,
+    batch_meta: Option<Value>,
 ) -> Value {
     let mut payload = json!(params);
     if let Some(split_meta) = split_meta {
@@ -873,7 +1038,108 @@ fn params_json_for_segment(
             .expect("segment params should serialize to an object")
             .insert("split".to_string(), split_meta);
     }
+    if let Some(batch_meta) = batch_meta {
+        payload
+            .as_object_mut()
+            .expect("segment params should serialize to an object")
+            .insert("batch".to_string(), batch_meta);
+    }
     payload
+}
+
+fn sweep_symbols(params: &Value) -> std::result::Result<Vec<String>, String> {
+    let batch_symbols = params
+        .get("batch")
+        .and_then(Value::as_object)
+        .and_then(|batch| batch.get("symbols"))
+        .and_then(Value::as_array)
+        .map(|symbols| {
+            symbols
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if !batch_symbols.is_empty() {
+        return Ok(batch_symbols);
+    }
+
+    let symbol = params
+        .get("symbol_contract")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    symbol
+        .map(|value| vec![value])
+        .ok_or_else(|| "batch.symbols or params.symbol_contract is required for orb sweep".to_string())
+}
+
+fn sweep_periods(params: &Value) -> std::result::Result<Vec<OrbSweepPeriod>, String> {
+    let batch_periods = params
+        .get("batch")
+        .and_then(Value::as_object)
+        .and_then(|batch| batch.get("periods"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if batch_periods.is_empty() {
+        return Ok(vec![OrbSweepPeriod {
+            label: "range".to_string(),
+            start: parse_datetime_field(params.get("start"), "params.start")?,
+            end: parse_datetime_field(params.get("end"), "params.end")?,
+        }]);
+    }
+
+    let mut periods = Vec::with_capacity(batch_periods.len());
+    for (index, period) in batch_periods.iter().enumerate() {
+        let period = period
+            .as_object()
+            .ok_or_else(|| format!("batch.periods[{index}] must be an object"))?;
+        let label = period
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("range")
+            .to_string();
+        let start = parse_datetime_field(period.get("start"), &format!("batch.periods[{index}].start"))?;
+        let end = parse_datetime_field(period.get("end"), &format!("batch.periods[{index}].end"))?;
+        periods.push(OrbSweepPeriod { label, start, end });
+    }
+    Ok(periods)
+}
+
+fn parse_datetime_field(
+    value: Option<&Value>,
+    field_name: &str,
+) -> std::result::Result<DateTime<Utc>, String> {
+    let value = value.ok_or_else(|| format!("{field_name} is required"))?;
+    serde_json::from_value(value.clone()).map_err(|error| format!("invalid {field_name}: {error}"))
+}
+
+fn params_for_sweep_member(params: &Value, symbol_contract: &str, period: &OrbSweepPeriod) -> Value {
+    let mut payload = params.as_object().cloned().unwrap_or_default();
+    payload.insert("symbol_contract".to_string(), json!(symbol_contract));
+    payload.insert("start".to_string(), json!(period.start));
+    payload.insert("end".to_string(), json!(period.end));
+    Value::Object(payload)
+}
+
+fn read_run_ids(value: Option<&Value>) -> Vec<Uuid> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|raw| Uuid::parse_str(raw).ok())
+        .collect()
 }
 
 async fn handle_dataset_export(
@@ -1990,4 +2256,95 @@ fn write_preset_profiles_parquet(
     writer.write(&batch)?;
     writer.close()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_datetime_field, params_for_sweep_member, sweep_periods, sweep_symbols, OrbSweepPeriod};
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    #[test]
+    fn sweep_symbols_prefers_batch_symbols() {
+        let payload = json!({
+            "symbol_contract": "NQM6",
+            "batch": {
+                "symbols": ["ESM6", " RTYM6 ", ""]
+            }
+        });
+
+        let symbols = sweep_symbols(&payload).unwrap();
+        assert_eq!(symbols, vec!["ESM6".to_string(), "RTYM6".to_string()]);
+    }
+
+    #[test]
+    fn sweep_symbols_falls_back_to_single_symbol() {
+        let payload = json!({
+            "symbol_contract": "NQM6"
+        });
+
+        let symbols = sweep_symbols(&payload).unwrap();
+        assert_eq!(symbols, vec!["NQM6".to_string()]);
+    }
+
+    #[test]
+    fn sweep_periods_fall_back_to_top_level_range() {
+        let payload = json!({
+            "start": "2026-02-18T14:30:00Z",
+            "end": "2026-02-18T21:00:00Z"
+        });
+
+        let periods = sweep_periods(&payload).unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].label, "range");
+        assert_eq!(periods[0].start, Utc.with_ymd_and_hms(2026, 2, 18, 14, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn sweep_periods_parse_batch_periods() {
+        let payload = json!({
+            "batch": {
+                "periods": [
+                    {
+                        "label": "week-1",
+                        "start": "2026-02-18T14:30:00Z",
+                        "end": "2026-02-18T21:00:00Z"
+                    },
+                    {
+                        "start": "2026-02-19T14:30:00Z",
+                        "end": "2026-02-19T21:00:00Z"
+                    }
+                ]
+            }
+        });
+
+        let periods = sweep_periods(&payload).unwrap();
+        assert_eq!(periods.len(), 2);
+        assert_eq!(periods[0].label, "week-1");
+        assert_eq!(periods[1].label, "range");
+    }
+
+    #[test]
+    fn params_for_sweep_member_rewrites_symbol_and_period() {
+        let payload = json!({
+            "symbol_contract": "NQM6",
+            "contracts": 2
+        });
+        let period = OrbSweepPeriod {
+            label: "week-1".to_string(),
+            start: Utc.with_ymd_and_hms(2026, 2, 18, 14, 30, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 2, 18, 21, 0, 0).unwrap(),
+        };
+
+        let params = params_for_sweep_member(&payload, "ESM6", &period);
+        assert_eq!(params["symbol_contract"], "ESM6");
+        assert_eq!(params["contracts"], 2);
+        assert_eq!(params["start"], "2026-02-18T14:30:00Z");
+    }
+
+    #[test]
+    fn parse_datetime_field_requires_value() {
+        let error = parse_datetime_field(None, "params.start").unwrap_err();
+        assert!(error.contains("params.start"));
+    }
 }
