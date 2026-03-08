@@ -411,7 +411,14 @@ async fn handle_build_bars(
     )
     .await?;
     let tick_rows = market
-        .load_ticks(symbol_contract, &TicksQuery { start, end })
+        .load_ticks(
+            symbol_contract,
+            &TicksQuery {
+                start,
+                end,
+                limit: u32::MAX,
+            },
+        )
         .await
         .map_err(|error| error.to_string())?;
     let ticks = tick_rows_to_canonical(&tick_rows);
@@ -570,7 +577,14 @@ async fn handle_build_profiles(
     )
     .await?;
     let tick_rows = market
-        .load_ticks(symbol_contract, &TicksQuery { start, end })
+        .load_ticks(
+            symbol_contract,
+            &TicksQuery {
+                start,
+                end,
+                limit: u32::MAX,
+            },
+        )
         .await
         .map_err(|error| error.to_string())?;
     let ticks = tick_rows_to_canonical(&tick_rows);
@@ -749,6 +763,7 @@ async fn run_orb_backtest(
                 timeframe: params.timeframe.clone(),
                 bar_type: "time".to_string(),
                 bar_size: None,
+                limit: u32::MAX,
             },
         )
         .await
@@ -994,6 +1009,7 @@ async fn export_bars_dataset(
                 timeframe: timeframe.clone(),
                 bar_type: bar_type.clone(),
                 bar_size,
+                limit: u32::MAX,
             },
         )
         .await
@@ -1119,7 +1135,14 @@ async fn export_ticks_dataset(
     )
     .await?;
     let ticks = market
-        .load_ticks(symbol_contract, &TicksQuery { start, end })
+        .load_ticks(
+            symbol_contract,
+            &TicksQuery {
+                start,
+                end,
+                limit: u32::MAX,
+            },
+        )
         .await
         .map_err(|error| format!("failed to load ticks for export: {error}"))?;
 

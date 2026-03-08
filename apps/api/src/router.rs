@@ -311,6 +311,7 @@ async fn get_ticks(
     Path(symbol): Path<String>,
     Query(query): Query<TicksQuery>,
 ) -> ApiResult<Json<Value>> {
+    query.validate()?;
     let ticks = state.market.load_ticks(&symbol, &query).await?;
     Ok(Json(json!({ "symbol_contract": symbol, "ticks": ticks })))
 }

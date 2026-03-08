@@ -61,6 +61,7 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - inspect/replay jobs
   - queue rebuilds
   - read market bars, preset profiles, and area profiles
+- market read endpoints now enforce bounded result sets by default so large chart and overlay queries do not return unbounded rows
 - the first Rust backtest path now exists for `orb_breakout_v1`:
   - the worker loads persisted time bars from ClickHouse
   - ORB simulation runs in `crates/backtest`

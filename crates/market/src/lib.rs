@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+const DEFAULT_TICKS_LIMIT: u32 = 10_000;
+const DEFAULT_BARS_LIMIT: u32 = 5_000;
+const DEFAULT_LARGE_ORDERS_LIMIT: u32 = 2_000;
+const MAX_TICKS_LIMIT: u32 = 50_000;
+const MAX_BARS_LIMIT: u32 = 20_000;
+const MAX_LARGE_ORDERS_LIMIT: u32 = 10_000;
+
 pub use bars::{
     build_bar_records, build_non_time_bars_from_ticks, build_time_bars_from_ticks,
     timeframe_to_seconds,
@@ -57,11 +64,13 @@ impl ClickHouseMarketStore {
                   AND ts >= ?
                   AND ts <= ?
                 ORDER BY ts
+                LIMIT ?
                 "#,
             )
             .bind(symbol)
             .bind(query.start)
             .bind(query.end)
+            .bind(query.limit as u64)
             .fetch_all::<TickRecord>()
             .await
             .map_err(map_clickhouse_err)
@@ -84,12 +93,14 @@ impl ClickHouseMarketStore {
                       AND ts >= ?
                       AND ts <= ?
                     ORDER BY ts
+                    LIMIT ?
                     "#,
                 )
                 .bind(symbol)
                 .bind(query.timeframe.clone())
                 .bind(query.start)
                 .bind(query.end)
+                .bind(query.limit as u64)
                 .fetch_all::<BarRecord>()
                 .await
                 .map_err(map_clickhouse_err);
@@ -120,6 +131,7 @@ impl ClickHouseMarketStore {
                   AND ts >= ?
                   AND ts <= ?
                 ORDER BY ts
+                LIMIT ?
                 "#,
             )
             .bind(symbol)
@@ -127,6 +139,7 @@ impl ClickHouseMarketStore {
             .bind(size)
             .bind(query.start)
             .bind(query.end)
+            .bind(query.limit as u64)
             .fetch_all::<BarRecord>()
             .await
             .map_err(map_clickhouse_err)
@@ -148,6 +161,7 @@ impl ClickHouseMarketStore {
                   AND ts >= ?
                   AND ts <= ?
                 ORDER BY ts
+                LIMIT ?
                 "#,
             )
             .bind(symbol)
@@ -155,6 +169,7 @@ impl ClickHouseMarketStore {
             .bind(query.fixed_threshold)
             .bind(query.start)
             .bind(query.end)
+            .bind(query.limit as u64)
             .fetch_all::<LargeOrderRecord>()
             .await
             .map_err(map_clickhouse_err)
@@ -273,6 +288,7 @@ impl ClickHouseMarketStore {
                 &TicksQuery {
                     start: query.start,
                     end: query.end,
+                    limit: MAX_TICKS_LIMIT,
                 },
             )
             .await?;
@@ -670,6 +686,8 @@ impl ClickHouseMarketStore {
 pub struct TicksQuery {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
+    #[serde(default = "default_ticks_limit")]
+    pub limit: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -680,6 +698,8 @@ pub struct BarsQuery {
     #[serde(default = "default_bar_type")]
     pub bar_type: String,
     pub bar_size: Option<u32>,
+    #[serde(default = "default_bars_limit")]
+    pub limit: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -727,12 +747,33 @@ pub struct LargeOrdersQuery {
     pub method: String,
     #[serde(default = "default_large_orders_threshold")]
     pub fixed_threshold: f64,
+    #[serde(default = "default_large_orders_limit")]
+    pub limit: u32,
+}
+
+impl TicksQuery {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.end < self.start {
+            return Err(ApiError::bad_request("end must be after start"));
+        }
+        if self.limit == 0 || self.limit > MAX_TICKS_LIMIT {
+            return Err(ApiError::bad_request(format!(
+                "limit must be between 1 and {MAX_TICKS_LIMIT}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl BarsQuery {
     pub fn validate(&self) -> Result<(), ApiError> {
         if self.end < self.start {
             return Err(ApiError::bad_request("end must be after start"));
+        }
+        if self.limit == 0 || self.limit > MAX_BARS_LIMIT {
+            return Err(ApiError::bad_request(format!(
+                "limit must be between 1 and {MAX_BARS_LIMIT}"
+            )));
         }
         match self.bar_type.as_str() {
             "time" => {
@@ -821,8 +862,21 @@ impl LargeOrdersQuery {
                 "fixed_threshold must be greater than 0",
             ));
         }
+        if self.limit == 0 || self.limit > MAX_LARGE_ORDERS_LIMIT {
+            return Err(ApiError::bad_request(format!(
+                "limit must be between 1 and {MAX_LARGE_ORDERS_LIMIT}"
+            )));
+        }
         Ok(())
     }
+}
+
+fn default_ticks_limit() -> u32 {
+    DEFAULT_TICKS_LIMIT
+}
+
+fn default_bars_limit() -> u32 {
+    DEFAULT_BARS_LIMIT
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Row)]
@@ -1258,6 +1312,10 @@ fn default_large_orders_threshold() -> f64 {
     25.0
 }
 
+fn default_large_orders_limit() -> u32 {
+    DEFAULT_LARGE_ORDERS_LIMIT
+}
+
 fn default_metric() -> String {
     "volume".to_string()
 }
@@ -1334,7 +1392,7 @@ pub fn build_profiles_for_ticks(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_large_orders_from_ticks, CanonicalTick, LargeOrdersQuery};
+    use super::{build_large_orders_from_ticks, BarsQuery, CanonicalTick, LargeOrdersQuery, TicksQuery};
     use chrono::{TimeZone, Utc};
 
     fn sample_ticks() -> Vec<CanonicalTick> {
@@ -1412,6 +1470,7 @@ mod tests {
             end: Utc.with_ymd_and_hms(2026, 3, 1, 15, 30, 0).unwrap(),
             method: "fixed".to_string(),
             fixed_threshold: 25.0,
+            limit: 500,
         };
         assert!(valid.validate().is_ok());
 
@@ -1434,5 +1493,34 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("fixed_threshold"));
+    }
+
+    #[test]
+    fn validates_tick_query_limits() {
+        let valid = TicksQuery {
+            start: Utc.with_ymd_and_hms(2026, 3, 1, 14, 30, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 3, 1, 15, 30, 0).unwrap(),
+            limit: 1000,
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = TicksQuery { limit: 0, ..valid };
+        assert!(invalid.validate().unwrap_err().to_string().contains("limit must be between"));
+    }
+
+    #[test]
+    fn validates_bar_query_limits() {
+        let valid = BarsQuery {
+            start: Utc.with_ymd_and_hms(2026, 3, 1, 14, 30, 0).unwrap(),
+            end: Utc.with_ymd_and_hms(2026, 3, 1, 15, 30, 0).unwrap(),
+            timeframe: "1m".to_string(),
+            bar_type: "time".to_string(),
+            bar_size: None,
+            limit: 1000,
+        };
+        assert!(valid.validate().is_ok());
+
+        let invalid = BarsQuery { limit: 25_000, ..valid };
+        assert!(invalid.validate().unwrap_err().to_string().contains("limit must be between"));
     }
 }

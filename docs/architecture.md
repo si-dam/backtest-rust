@@ -25,6 +25,7 @@
 
 - `POST /api/v1/ingestion/jobs` accepts a server-local file path and enqueues ingest work in Postgres.
 - `runtime-worker` parses supported `.csv` and tab-delimited `.txt` inputs, persists canonical ticks or 1m bars, records ingest metadata, and enqueues derived jobs.
+- The market read API now applies explicit row caps to ticks, bars, and large-order queries so request behavior stays bounded as history grows.
 - Derived jobs materialize:
   - time bars into `bars_time`
   - non-time bars into `bars_non_time`
