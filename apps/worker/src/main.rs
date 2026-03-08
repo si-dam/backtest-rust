@@ -2326,9 +2326,14 @@ fn write_preset_profiles_parquet(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_datetime_field, params_for_sweep_member, sweep_periods, sweep_symbols, OrbSweepPeriod};
+    use super::{
+        annotate_strategy_bars_with_large_orders, parse_datetime_field, params_for_sweep_member,
+        sweep_periods, sweep_symbols, OrbSweepPeriod,
+    };
     use chrono::{TimeZone, Utc};
+    use market::LargeOrderRow;
     use serde_json::json;
+    use backtest::StrategyBar;
 
     #[test]
     fn sweep_symbols_prefers_batch_symbols() {
@@ -2412,5 +2417,61 @@ mod tests {
     fn parse_datetime_field_requires_value() {
         let error = parse_datetime_field(None, "params.start").unwrap_err();
         assert!(error.contains("params.start"));
+    }
+
+    #[test]
+    fn annotate_strategy_bars_marks_big_prints_by_side() {
+        let mut bars = vec![
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 0).unwrap(),
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.0,
+                volume: 10.0,
+                has_big_buy: false,
+                has_big_sell: false,
+            },
+            StrategyBar {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 0).unwrap(),
+                open: 100.0,
+                high: 103.0,
+                low: 100.0,
+                close: 102.0,
+                volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
+            },
+        ];
+        let orders = vec![
+            LargeOrderRow {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 30).unwrap(),
+                trading_day: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 30).unwrap().date_naive(),
+                session_date: Utc.with_ymd_and_hms(2026, 2, 18, 14, 31, 30).unwrap().date_naive(),
+                symbol_contract: "NQH6".to_string(),
+                method: "fixed".to_string(),
+                threshold: 25.0,
+                trade_price: 100.25,
+                trade_size: 30.0,
+                side: "buy".to_string(),
+            },
+            LargeOrderRow {
+                ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 30).unwrap(),
+                trading_day: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 30).unwrap().date_naive(),
+                session_date: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 30).unwrap().date_naive(),
+                symbol_contract: "NQH6".to_string(),
+                method: "fixed".to_string(),
+                threshold: 25.0,
+                trade_price: 101.75,
+                trade_size: 35.0,
+                side: "sell".to_string(),
+            },
+        ];
+
+        annotate_strategy_bars_with_large_orders(&mut bars, &orders, "1m").unwrap();
+        assert!(bars[0].has_big_buy);
+        assert!(!bars[0].has_big_sell);
+        assert!(bars[1].has_big_sell);
+        assert!(!bars[1].has_big_buy);
     }
 }
