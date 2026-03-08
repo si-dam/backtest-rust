@@ -1852,6 +1852,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-validate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "backtest",
+ "chrono",
+ "chrono-tz",
+ "market",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "runtime-worker"
 version = "0.1.0"
 dependencies = [

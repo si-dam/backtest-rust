@@ -34,6 +34,7 @@ The imported Python application is preserved under `reference/backtest/` as the 
 4. Run:
    - `cargo run -p runtime-api`
    - `cargo run -p runtime-worker`
+   - `cargo run -p runtime-validate -- <path-to-market-file.txt> --run-orb`
    - `npm run dev` from `frontend/`
 
 This repo does not assume a local Docker stack. Postgres and ClickHouse can be attached later from whatever local or remote instances you prefer.
@@ -42,6 +43,12 @@ API liveness and readiness endpoints are separate:
 - `GET /health` checks process liveness
 - `GET /ready` checks Postgres and ClickHouse connectivity
 - all API responses now include `x-request-id`
+
+For local parity/performance checks on real files without a running DB, use `runtime-validate`. Example:
+
+`cargo run -p runtime-validate -- data/NQ_sample.txt --symbol NQM6 --run-orb --strategy-mode big_order_required --big-trade-threshold 25`
+
+It parses the source file and emits a JSON summary with row counts, timing for bar/profile/large-order construction, and optional ORB summary metrics.
 
 ## Current state
 

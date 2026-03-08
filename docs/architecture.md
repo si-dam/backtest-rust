@@ -4,6 +4,7 @@
 
 - `runtime-api`: serves `/api/v1`, validates requests, and shapes responses.
 - `runtime-worker`: leases jobs from Postgres and runs background tasks.
+- `runtime-validate`: runs parse/build/backtest timing on a local `.txt` or `.csv` file and emits a JSON validation report without requiring Postgres or ClickHouse.
 - `market`: owns ingest parsing, ClickHouse reads/writes, bar generation, and profile derivation.
 - `jobs`: owns Postgres-backed queue primitives and job lifecycle.
 - `backtest`: owns strategy execution and analytics.
