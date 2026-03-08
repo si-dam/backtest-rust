@@ -4,6 +4,16 @@ export interface SymbolRecord {
   symbol_contract: string;
 }
 
+export interface IngestedFileRecord {
+  id: string;
+  source_path: string;
+  source_hash: string;
+  schema_kind: string;
+  symbol_contract: string | null;
+  row_count: number;
+  created_at: string;
+}
+
 export interface JobRecord {
   id: string;
   job_type: string;
@@ -201,6 +211,11 @@ export function createIngestionJob(payload: {
   rebuild?: boolean;
 }) {
   return postJson<typeof payload, { job_id: string }>("/ingestion/jobs", payload);
+}
+
+export function getIngestedFiles(params?: URLSearchParams) {
+  const suffix = params ? `?${params.toString()}` : "";
+  return fetchJson<{ files: IngestedFileRecord[] }>(`/ingestion/files${suffix}`);
 }
 
 export function createBacktestJob(payload: {

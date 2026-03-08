@@ -1,7 +1,7 @@
 use std::env;
 
 use anyhow::Result;
-use app_core::config::Settings;
+use app_core::config::{LogFormat, Settings};
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
@@ -43,6 +43,7 @@ async fn test_pool_and_settings() -> Result<Option<(sqlx::PgPool, Settings)>> {
         dataset_timezone: "America/New_York".parse()?,
         worker_poll_interval_ms: 250,
         rust_log: "error".to_string(),
+        log_format: LogFormat::Plain,
     };
 
     Ok(Some((pool, settings)))
@@ -88,6 +89,40 @@ async fn create_backtest_job_enqueues_runtime_job() -> Result<()> {
     assert_eq!(job.job_type, JobType::BacktestRun.as_str());
     assert_eq!(job.status, "queued");
     assert_eq!(job.payload_json["strategy_id"], "orb_breakout_v1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn list_ingested_files_returns_recent_metadata() -> Result<()> {
+    let Some((pool, settings)) = test_pool_and_settings().await? else {
+        return Ok(());
+    };
+
+    let jobs = PgJobStore::new(pool.clone());
+    jobs.record_ingested_file(
+        "/tmp/NQM6_2026-02-18.txt",
+        "abc123",
+        "ticks",
+        Some("NQM6"),
+        1024,
+    )
+    .await?;
+
+    let app = build_router(settings).await?;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ingestion/files?symbol_contract=NQM6")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await?;
+    let files = body["files"].as_array().expect("files response should be an array");
+    assert!(!files.is_empty());
+    assert_eq!(files[0]["symbol_contract"], "NQM6");
+    assert_eq!(files[0]["schema_kind"], "ticks");
 
     Ok(())
 }

@@ -14,7 +14,10 @@ use axum::{
     Json, Router,
 };
 use backtest::{list_backtest_strategies, BacktestJobRequest, BacktestTradeRecord, PgBacktestStore};
-use jobs::{CreateJobInput, JobSubmitted, JobType, ListDatasetExportsInput, ListJobsInput, PgJobStore};
+use jobs::{
+    CreateJobInput, JobSubmitted, JobType, ListDatasetExportsInput, ListIngestedFilesInput,
+    ListJobsInput, PgJobStore,
+};
 use market::{AreaProfileQuery, BarsQuery, ClickHouseMarketStore, LargeOrdersQuery, PresetProfileQuery, TicksQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -48,6 +51,13 @@ struct DatasetJobRequest {
 struct DatasetExportsQuery {
     export_kind: Option<String>,
     job_id: Option<Uuid>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IngestedFilesQuery {
+    symbol_contract: Option<String>,
+    schema_kind: Option<String>,
     limit: Option<i64>,
 }
 
@@ -101,6 +111,7 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
 
     let api_v1 = Router::new()
         .route("/ingestion/jobs", post(create_ingestion_job))
+        .route("/ingestion/files", get(list_ingested_files))
         .route("/jobs", get(list_jobs))
         .route("/jobs/:job_id", get(get_job))
         .route("/jobs/:job_id/replay", post(replay_job))
@@ -224,6 +235,23 @@ async fn create_ingestion_job(
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
     Ok((StatusCode::ACCEPTED, Json(JobSubmitted { job_id: job.id })))
+}
+
+async fn list_ingested_files(
+    State(state): State<AppState>,
+    Query(query): Query<IngestedFilesQuery>,
+) -> ApiResult<Json<Value>> {
+    let files = state
+        .jobs
+        .list_ingested_files(ListIngestedFilesInput {
+            symbol_contract: query.symbol_contract.as_deref(),
+            schema_kind: query.schema_kind.as_deref(),
+            limit: query.limit.unwrap_or(50),
+        })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    Ok(Json(json!({ "files": files })))
 }
 
 async fn get_job(State(state): State<AppState>, Path(job_id): Path<Uuid>) -> ApiResult<Json<Value>> {

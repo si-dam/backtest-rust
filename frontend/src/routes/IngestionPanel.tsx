@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { createIngestionJob, getJob } from "../lib/api";
+import { createIngestionJob, getIngestedFiles, getJob } from "../lib/api";
 
 interface IngestionPanelProps {
   selectedSymbol: string;
@@ -33,6 +33,19 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
       const status = query.state.data?.status;
       return status === "succeeded" || status === "failed" || status === "dead_letter" ? false : 2000;
     },
+  });
+
+  const filesQuery = useQuery({
+    queryKey: ["ingested-files", selectedSymbol],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (selectedSymbol) {
+        params.set("symbol_contract", selectedSymbol);
+      }
+      params.set("limit", "12");
+      return getIngestedFiles(params);
+    },
+    refetchInterval: 5000,
   });
 
   return (
@@ -133,6 +146,37 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
             ) : null}
           </div>
         ) : null}
+      </article>
+
+      <article className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">History</p>
+            <h2>Recent ingested files</h2>
+          </div>
+          <span className="pill">{filesQuery.data?.files.length ?? 0} shown</span>
+        </div>
+        {filesQuery.isLoading ? <p>Loading ingested files…</p> : null}
+        {filesQuery.isError ? <p className="error-copy">{filesQuery.error.message}</p> : null}
+        <div className="stack">
+          {filesQuery.data?.files.map((file) => (
+            <div className="list-row" key={file.id}>
+              <div>
+                <strong>{file.symbol_contract ?? "Unknown symbol"}</strong>
+                <p className="microcopy">{file.source_path}</p>
+              </div>
+              <div>
+                <strong>{file.row_count.toLocaleString()} rows</strong>
+                <p className="microcopy">
+                  {file.schema_kind} • {new Date(file.created_at).toLocaleString()}
+                </p>
+              </div>
+            </div>
+          ))}
+          {!filesQuery.isLoading && !filesQuery.data?.files.length ? (
+            <p className="microcopy">No ingested file metadata yet for the current filter.</p>
+          ) : null}
+        </div>
       </article>
     </section>
   );

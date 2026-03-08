@@ -73,6 +73,7 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
 - fixed-threshold large orders are also persisted during bar rebuilds, and rebuild controls can target `large_orders` directly or override the threshold used for those rows
 - the frontend can now operate the control plane as well as the market views:
   - ingest files
+  - inspect recent ingested file metadata
   - inspect/replay jobs
   - queue rebuilds
   - read market bars, preset profiles, and area profiles

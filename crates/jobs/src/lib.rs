@@ -114,6 +114,13 @@ pub struct ListDatasetExportsInput<'a> {
     pub limit: i64,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ListIngestedFilesInput<'a> {
+    pub symbol_contract: Option<&'a str>,
+    pub schema_kind: Option<&'a str>,
+    pub limit: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct JobProgressUpdate {
     pub stage: String,
@@ -258,6 +265,38 @@ impl PgJobStore {
         .context("failed to load ingested file")?;
 
         Ok(record)
+    }
+
+    pub async fn list_ingested_files(
+        &self,
+        input: ListIngestedFilesInput<'_>,
+    ) -> anyhow::Result<Vec<IngestedFileRecord>> {
+        let limit = if input.limit <= 0 { 50 } else { input.limit.min(200) };
+        let records = sqlx::query_as::<_, IngestedFileRecord>(
+            r#"
+            SELECT
+                id,
+                source_path,
+                source_hash,
+                schema_kind,
+                symbol_contract,
+                row_count,
+                created_at
+            FROM ingested_files
+            WHERE ($1::text IS NULL OR symbol_contract = $1)
+              AND ($2::text IS NULL OR schema_kind = $2)
+            ORDER BY created_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(input.symbol_contract)
+        .bind(input.schema_kind)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list ingested files")?;
+
+        Ok(records)
     }
 
     pub async fn record_dataset_export(
