@@ -6,7 +6,7 @@ use app_core::{
     error::{ApiError, ApiResult},
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::{header, HeaderName, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::Response,
@@ -111,6 +111,7 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
 
     let api_v1 = Router::new()
         .route("/ingestion/jobs", post(create_ingestion_job))
+        .route("/ingestion/uploads/jobs", post(upload_ingestion_job))
         .route("/ingestion/files", get(list_ingested_files))
         .route("/jobs", get(list_jobs))
         .route("/jobs/{job_id}", get(get_job))
@@ -220,14 +221,91 @@ async fn create_ingestion_job(
         return Err(ApiError::not_found("requested ingest file does not exist"));
     }
 
+    submit_ingestion_job(&state, normalized, payload.symbol_contract, payload.rebuild).await
+}
+
+async fn upload_ingestion_job(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> ApiResult<(StatusCode, Json<JobSubmitted>)> {
+    let upload_root = state.settings.ingest_root.join("uploads");
+    tokio::fs::create_dir_all(&upload_root)
+        .await
+        .map_err(|error| ApiError::internal(format!("failed to prepare upload directory: {error}")))?;
+
+    let mut uploaded_path: Option<PathBuf> = None;
+    let mut symbol_contract: Option<String> = None;
+    let mut rebuild = false;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(format!("invalid multipart request: {error}")))?
+    {
+        let Some(name) = field.name().map(str::to_owned) else {
+            continue;
+        };
+
+        match name.as_str() {
+            "file" => {
+                let file_name = field
+                    .file_name()
+                    .map(sanitize_upload_filename)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "upload.dat".to_string());
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|error| ApiError::bad_request(format!("failed to read upload: {error}")))?;
+                if bytes.is_empty() {
+                    return Err(ApiError::bad_request("uploaded file is empty"));
+                }
+
+                let stored_path = upload_root.join(format!("{}-{}", Uuid::new_v4(), file_name));
+                tokio::fs::write(&stored_path, &bytes)
+                    .await
+                    .map_err(|error| ApiError::internal(format!("failed to persist upload: {error}")))?;
+                uploaded_path = Some(stored_path);
+            }
+            "symbol_contract" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::bad_request(format!("failed to read symbol_contract: {error}")))?;
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    symbol_contract = Some(trimmed.to_string());
+                }
+            }
+            "rebuild" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|error| ApiError::bad_request(format!("failed to read rebuild flag: {error}")))?;
+                rebuild = matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            }
+            _ => {}
+        }
+    }
+
+    let uploaded_path = uploaded_path.ok_or_else(|| ApiError::bad_request("missing file upload"))?;
+    submit_ingestion_job(&state, uploaded_path, symbol_contract, rebuild).await
+}
+
+async fn submit_ingestion_job(
+    state: &AppState,
+    file_path: PathBuf,
+    symbol_contract: Option<String>,
+    rebuild: bool,
+) -> ApiResult<(StatusCode, Json<JobSubmitted>)> {
     let job = state
         .jobs
         .create_job(CreateJobInput {
             job_type: JobType::Ingestion,
             payload_json: json!({
-                "file_path": normalized,
-                "symbol_contract": payload.symbol_contract,
-                "rebuild": payload.rebuild,
+                "file_path": file_path,
+                "symbol_contract": symbol_contract,
+                "rebuild": rebuild,
             }),
             max_attempts: 5,
         })
@@ -235,6 +313,19 @@ async fn create_ingestion_job(
         .map_err(|error| ApiError::internal(error.to_string()))?;
 
     Ok((StatusCode::ACCEPTED, Json(JobSubmitted { job_id: job.id })))
+}
+
+fn sanitize_upload_filename(value: &str) -> String {
+    value
+        .chars()
+        .map(|char| match char {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' => char,
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches('.')
+        .trim_matches('_')
+        .to_string()
 }
 
 async fn list_ingested_files(

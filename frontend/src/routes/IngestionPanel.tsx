@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { createIngestionJob, getIngestedFiles, getJob } from "../lib/api";
+import { createIngestionJob, getIngestedFiles, getJob, uploadIngestionJob } from "../lib/api";
 
 interface IngestionPanelProps {
   selectedSymbol: string;
 }
 
 export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) {
+  const [sourceMode, setSourceMode] = useState<"upload" | "server_path">("upload");
   const [filePath, setFilePath] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [symbolOverride, setSymbolOverride] = useState(selectedSymbol);
   const [rebuild, setRebuild] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -19,7 +21,24 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
   }, [selectedSymbol, symbolOverride]);
 
   const createJobMutation = useMutation({
-    mutationFn: createIngestionJob,
+    mutationFn: async () => {
+      if (sourceMode === "upload") {
+        if (!selectedFile) {
+          throw new Error("Select a .txt or .csv file first.");
+        }
+        return uploadIngestionJob({
+          file: selectedFile,
+          symbol_contract: symbolOverride || undefined,
+          rebuild,
+        });
+      }
+
+      return createIngestionJob({
+        file_path: filePath,
+        symbol_contract: symbolOverride || undefined,
+        rebuild,
+      });
+    },
     onSuccess: (response) => {
       setActiveJobId(response.job_id);
     },
@@ -54,31 +73,61 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
         <div className="panel-header">
           <div>
             <p className="eyebrow">Ingestion</p>
-            <h2>Queue a server-local market data file</h2>
+            <h2>Queue a market data file</h2>
           </div>
           <span className="pill">{activeJobId ? "queued" : "idle"}</span>
+        </div>
+        <div className="tab-row">
+          <button
+            className={sourceMode === "upload" ? "subnav-button active" : "subnav-button"}
+            type="button"
+            onClick={() => setSourceMode("upload")}
+          >
+            Browse local file
+          </button>
+          <button
+            className={sourceMode === "server_path" ? "subnav-button active" : "subnav-button"}
+            type="button"
+            onClick={() => setSourceMode("server_path")}
+          >
+            Use server path
+          </button>
         </div>
         <form
           className="stack"
           onSubmit={(event) => {
             event.preventDefault();
-            createJobMutation.mutate({
-              file_path: filePath,
-              symbol_contract: symbolOverride || undefined,
-              rebuild,
-            });
+            createJobMutation.mutate();
           }}
         >
-          <label className="field">
-            <span className="field-label">File path</span>
-            <input
-              className="field-input"
-              placeholder="data/NQH6_ticks.txt"
-              required
-              value={filePath}
-              onChange={(event) => setFilePath(event.target.value)}
-            />
-          </label>
+          {sourceMode === "upload" ? (
+            <label className="field">
+              <span className="field-label">Local file</span>
+              <input
+                accept=".txt,.csv,text/plain,text/csv"
+                className="field-input"
+                required
+                type="file"
+                onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+              />
+              <span className="microcopy">
+                {selectedFile
+                  ? `${selectedFile.name} • ${(selectedFile.size / 1024 / 1024).toFixed(2)} MB`
+                  : "Choose a Sierra .txt or .csv export from your machine."}
+              </span>
+            </label>
+          ) : (
+            <label className="field">
+              <span className="field-label">File path</span>
+              <input
+                className="field-input"
+                placeholder="data/NQH6_ticks.txt"
+                required
+                value={filePath}
+                onChange={(event) => setFilePath(event.target.value)}
+              />
+            </label>
+          )}
 
           <label className="field">
             <span className="field-label">Symbol override</span>
@@ -104,8 +153,9 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
           <p className="error-copy">{createJobMutation.error.message}</p>
         ) : null}
         <p className="microcopy">
-          Phase 1 keeps ingest semantics server-local. The path must remain inside the configured ingest root and can be
-          a comma-delimited `.csv` or tab-delimited `.txt` export.
+          {sourceMode === "upload"
+            ? "The selected file is uploaded into the configured ingest root and queued as a normal ingestion job."
+            : "Server-path mode still requires a path inside the configured ingest root and can use a comma-delimited .csv or tab-delimited .txt export."}
         </p>
       </article>
 
@@ -118,7 +168,7 @@ export default function IngestionPanel({ selectedSymbol }: IngestionPanelProps) 
           <span className="pill">{jobQuery.data?.status ?? "idle"}</span>
         </div>
 
-        {!activeJobId ? <p>Submit an ingest job to start polling `/api/v1/jobs/:job_id`.</p> : null}
+        {!activeJobId ? <p>Submit an ingest job to start polling <code>/api/v1/jobs/{"{job_id}"}</code>.</p> : null}
         {jobQuery.isLoading ? <p>Loading job state…</p> : null}
         {jobQuery.isError ? <p className="error-copy">{jobQuery.error.message}</p> : null}
         {jobQuery.data ? (

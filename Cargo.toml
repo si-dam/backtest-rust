@@ -21,7 +21,7 @@ app-core = { path = "crates/app-core" }
 arrow-array = "56.2.0"
 arrow-schema = "56.2.0"
 async-trait = "0.1.88"
-axum = { version = "0.8.1", features = ["macros", "json"] }
+axum = { version = "0.8.1", features = ["macros", "json", "multipart"] }
 backtest = { path = "crates/backtest" }
 chrono = { version = "0.4.40", features = ["serde"] }
 chrono-tz = "0.10.4"

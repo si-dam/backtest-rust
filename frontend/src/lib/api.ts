@@ -213,6 +213,31 @@ export function createIngestionJob(payload: {
   return postJson<typeof payload, { job_id: string }>("/ingestion/jobs", payload);
 }
 
+export async function uploadIngestionJob(payload: {
+  file: File;
+  symbol_contract?: string;
+  rebuild?: boolean;
+}) {
+  const formData = new FormData();
+  formData.append("file", payload.file);
+  if (payload.symbol_contract) {
+    formData.append("symbol_contract", payload.symbol_contract);
+  }
+  formData.append("rebuild", payload.rebuild ? "true" : "false");
+
+  const response = await fetch(`${apiBaseUrl}/ingestion/uploads/jobs`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `request failed: ${response.status}`);
+  }
+
+  return (await response.json()) as { job_id: string };
+}
+
 export function getIngestedFiles(params?: URLSearchParams) {
   const suffix = params ? `?${params.toString()}` : "";
   return fetchJson<{ files: IngestedFileRecord[] }>(`/ingestion/files${suffix}`);
