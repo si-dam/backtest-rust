@@ -1,0 +1,101 @@
+[
+  {
+    "ts": "2026-02-24T14:25:00Z",
+    "trading_day": "2026-02-24",
+    "session_date": "2026-02-24",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.0,
+    "trade_size": 1.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-02-24T14:35:00Z",
+    "trading_day": "2026-02-24",
+    "session_date": "2026-02-24",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.25,
+    "trade_size": 2.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-02-24T20:59:00Z",
+    "trading_day": "2026-02-24",
+    "session_date": "2026-02-24",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.5,
+    "trade_size": 3.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-02-24T21:05:00Z",
+    "trading_day": "2026-02-24",
+    "session_date": "2026-02-24",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.75,
+    "trade_size": 4.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-02-25T14:20:00Z",
+    "trading_day": "2026-02-25",
+    "session_date": "2026-02-25",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.0,
+    "trade_size": 5.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-02-25T14:31:00Z",
+    "trading_day": "2026-02-25",
+    "session_date": "2026-02-25",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.25,
+    "trade_size": 6.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-02-25T21:01:00Z",
+    "trading_day": "2026-02-25",
+    "session_date": "2026-02-25",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.5,
+    "trade_size": 7.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-03-02T20:00:00Z",
+    "trading_day": "2026-03-02",
+    "session_date": "2026-03-02",
+    "symbol_contract": "NQH6",
+    "trade_price": 100.75,
+    "trade_size": 8.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  },
+  {
+    "ts": "2026-03-02T21:00:00Z",
+    "trading_day": "2026-03-02",
+    "session_date": "2026-03-02",
+    "symbol_contract": "NQH6",
+    "trade_price": 101.0,
+    "trade_size": 9.0,
+    "bid_price": 99.75,
+    "ask_price": 100.0,
+    "source_file": null
+  }
+]

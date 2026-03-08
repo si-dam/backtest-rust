@@ -74,6 +74,6 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - the worker writes `bars.parquet`, `ticks.parquet`, `preset_profiles.parquet`, or `backtest_trades.parquet` plus `manifest.json` under `ARTIFACT_ROOT/dataset_exports/<job_id>/`
   - export metadata is recorded in `dataset_exports`
   - a minimal Python reader lives at `python/examples/read_bars_export.py`
-- fixture-based golden tests now lock down time, tick, volume, and range bars plus multi-preset profile behavior in `crates/market/tests/`
+- fixture-based golden tests now lock down time, tick, volume, and range bars plus both compact and multi-session preset-profile behavior in `crates/market/tests/`
 
 The remaining work is to deepen backtest parity, expand dataset export coverage, and validate more of the rewrite against the imported Python reference app.

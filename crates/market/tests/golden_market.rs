@@ -38,6 +38,30 @@ struct GoldenLevel {
     value: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct GoldenProfileSummaryExpected {
+    profile_count: usize,
+    totals: Vec<GoldenProfileTotal>,
+    levels: Vec<GoldenProfileLevels>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoldenProfileTotal {
+    preset: String,
+    metric: String,
+    label: String,
+    total_value: f64,
+    max_value: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoldenProfileLevels {
+    preset: String,
+    metric: String,
+    label: String,
+    levels: Vec<GoldenLevel>,
+}
+
 #[test]
 fn matches_golden_bars_and_profiles() {
     let ticks: Vec<CanonicalTick> = serde_json::from_str(include_str!("fixtures/golden_ticks.json")).unwrap();
@@ -114,6 +138,73 @@ fn matches_golden_bars_and_profiles() {
             assert_close(actual_level.value, expected_level.value);
         }
     }
+}
+
+#[test]
+fn matches_multiday_profile_golden_fixture() {
+    let ticks: Vec<CanonicalTick> =
+        serde_json::from_str(include_str!("fixtures/golden_multiday_ticks.json")).unwrap();
+    let expected: GoldenProfileSummaryExpected =
+        serde_json::from_str(include_str!("fixtures/golden_multiday_expected.json")).unwrap();
+
+    let profiles = build_profiles_for_ticks("NQH6", &ticks, New_York, 0.25);
+    assert_eq!(profiles.len(), expected.profile_count);
+
+    for expected_total in expected.totals {
+        let actual = find_profile(&profiles, &expected_total.preset, &expected_total.metric, &expected_total.label);
+        assert_close(actual.segment.total_value, expected_total.total_value);
+        assert_close(actual.segment.max_value, expected_total.max_value);
+    }
+
+    for expected_levels in expected.levels {
+        let actual = find_profile(
+            &profiles,
+            &expected_levels.preset,
+            &expected_levels.metric,
+            &expected_levels.label,
+        );
+        let actual_levels = actual
+            .levels
+            .iter()
+            .map(|level| GoldenLevel {
+                price_level: level.price_level,
+                value: if expected_levels.metric == "delta" {
+                    level.delta
+                } else {
+                    level.total_volume
+                },
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual_levels.len(),
+            expected_levels.levels.len(),
+            "level count mismatch for {} {} {}",
+            expected_levels.preset,
+            expected_levels.metric,
+            expected_levels.label
+        );
+        for (actual_level, expected_level) in actual_levels.iter().zip(expected_levels.levels.iter()) {
+            assert_close(actual_level.price_level, expected_level.price_level);
+            assert_close(actual_level.value, expected_level.value);
+        }
+    }
+}
+
+fn find_profile<'a>(
+    profiles: &'a [market::PersistedProfile],
+    preset: &str,
+    metric: &str,
+    label: &str,
+) -> &'a market::PersistedProfile {
+    profiles
+        .iter()
+        .find(|profile| {
+            profile.segment.preset == preset
+                && profile.segment.metric == metric
+                && profile.segment.label == label
+        })
+        .unwrap_or_else(|| panic!("missing profile {preset} {metric} {label}"))
 }
 
 fn assert_close(left: f64, right: f64) {

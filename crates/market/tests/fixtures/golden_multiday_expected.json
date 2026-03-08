@@ -1,0 +1,75 @@
+{
+  "profile_count": 28,
+  "totals": [
+    { "preset": "day", "metric": "volume", "label": "Day 2026-02-23", "total_value": 6.0, "max_value": 3.0 },
+    { "preset": "day", "metric": "volume", "label": "Day 2026-02-24", "total_value": 15.0, "max_value": 6.0 },
+    { "preset": "day", "metric": "volume", "label": "Day 2026-02-25", "total_value": 7.0, "max_value": 7.0 },
+    { "preset": "day", "metric": "volume", "label": "Day 2026-03-01", "total_value": 8.0, "max_value": 8.0 },
+    { "preset": "day", "metric": "volume", "label": "Day 2026-03-02", "total_value": 9.0, "max_value": 9.0 },
+    { "preset": "day", "metric": "delta", "label": "Day 2026-02-23", "total_value": 6.0, "max_value": 3.0 },
+    { "preset": "day", "metric": "delta", "label": "Day 2026-02-24", "total_value": 15.0, "max_value": 6.0 },
+    { "preset": "day", "metric": "delta", "label": "Day 2026-02-25", "total_value": 7.0, "max_value": 7.0 },
+    { "preset": "day", "metric": "delta", "label": "Day 2026-03-01", "total_value": 8.0, "max_value": 8.0 },
+    { "preset": "day", "metric": "delta", "label": "Day 2026-03-02", "total_value": 9.0, "max_value": 9.0 },
+    { "preset": "week", "metric": "volume", "label": "Week 2026-W09", "total_value": 28.0, "max_value": 10.0 },
+    { "preset": "week", "metric": "volume", "label": "Week 2026-W10", "total_value": 17.0, "max_value": 9.0 },
+    { "preset": "week", "metric": "delta", "label": "Week 2026-W09", "total_value": 28.0, "max_value": 10.0 },
+    { "preset": "week", "metric": "delta", "label": "Week 2026-W10", "total_value": 17.0, "max_value": 9.0 },
+    { "preset": "rth", "metric": "volume", "label": "RTH 2026-02-24", "total_value": 5.0, "max_value": 3.0 },
+    { "preset": "rth", "metric": "volume", "label": "RTH 2026-02-25", "total_value": 6.0, "max_value": 6.0 },
+    { "preset": "rth", "metric": "volume", "label": "RTH 2026-03-02", "total_value": 8.0, "max_value": 8.0 },
+    { "preset": "rth", "metric": "delta", "label": "RTH 2026-02-24", "total_value": 5.0, "max_value": 3.0 },
+    { "preset": "rth", "metric": "delta", "label": "RTH 2026-02-25", "total_value": 6.0, "max_value": 6.0 },
+    { "preset": "rth", "metric": "delta", "label": "RTH 2026-03-02", "total_value": 8.0, "max_value": 8.0 },
+    { "preset": "eth", "metric": "volume", "label": "ETH 2026-02-23", "total_value": 1.0, "max_value": 1.0 },
+    { "preset": "eth", "metric": "volume", "label": "ETH 2026-02-24", "total_value": 9.0, "max_value": 5.0 },
+    { "preset": "eth", "metric": "volume", "label": "ETH 2026-02-25", "total_value": 7.0, "max_value": 7.0 },
+    { "preset": "eth", "metric": "volume", "label": "ETH 2026-03-02", "total_value": 9.0, "max_value": 9.0 },
+    { "preset": "eth", "metric": "delta", "label": "ETH 2026-02-23", "total_value": 1.0, "max_value": 1.0 },
+    { "preset": "eth", "metric": "delta", "label": "ETH 2026-02-24", "total_value": 9.0, "max_value": 5.0 },
+    { "preset": "eth", "metric": "delta", "label": "ETH 2026-02-25", "total_value": 7.0, "max_value": 7.0 },
+    { "preset": "eth", "metric": "delta", "label": "ETH 2026-03-02", "total_value": 9.0, "max_value": 9.0 }
+  ],
+  "levels": [
+    {
+      "preset": "week",
+      "metric": "volume",
+      "label": "Week 2026-W09",
+      "levels": [
+        { "price_level": 100.0, "value": 6.0 },
+        { "price_level": 100.25, "value": 8.0 },
+        { "price_level": 100.5, "value": 10.0 },
+        { "price_level": 100.75, "value": 4.0 }
+      ]
+    },
+    {
+      "preset": "day",
+      "metric": "volume",
+      "label": "Day 2026-02-24",
+      "levels": [
+        { "price_level": 100.0, "value": 5.0 },
+        { "price_level": 100.25, "value": 6.0 },
+        { "price_level": 100.75, "value": 4.0 }
+      ]
+    },
+    {
+      "preset": "eth",
+      "metric": "volume",
+      "label": "ETH 2026-02-24",
+      "levels": [
+        { "price_level": 100.0, "value": 5.0 },
+        { "price_level": 100.75, "value": 4.0 }
+      ]
+    },
+    {
+      "preset": "day",
+      "metric": "delta",
+      "label": "Day 2026-02-24",
+      "levels": [
+        { "price_level": 100.0, "value": 5.0 },
+        { "price_level": 100.25, "value": 6.0 },
+        { "price_level": 100.75, "value": 4.0 }
+      ]
+    }
+  ]
+}

@@ -59,4 +59,4 @@
   - read persisted fixed-threshold large-order rows
   - read persisted preset profiles and ad hoc area profiles with client-side filter controls
   - submit and inspect ORB backtest runs
-- `crates/market/tests/fixtures/` contains the first golden dataset used to lock down bar/profile derivation behavior during the rewrite, including non-time bar variants and week/RTH/ETH profile cases.
+- `crates/market/tests/fixtures/` contains golden datasets used to lock down bar/profile derivation behavior during the rewrite, including non-time bar variants plus compact and multi-session week/RTH/ETH profile cases.
