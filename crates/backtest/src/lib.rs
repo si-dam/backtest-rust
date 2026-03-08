@@ -68,6 +68,12 @@ pub enum EntryMode {
     ReentryAfterStop,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyMode {
+    BreakoutOnly,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
@@ -97,8 +103,30 @@ pub struct OrbStrategyParams {
     pub stop_mode: StopMode,
     pub tp_r_multiple: f64,
     pub entry_mode: EntryMode,
+    pub strategy_mode: StrategyMode,
     pub contracts: i32,
     pub timezone: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StrategyMetadata {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub defaults: Value,
+    pub params: Vec<StrategyParamMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StrategyParamMetadata {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -338,6 +366,58 @@ impl PgBacktestStore {
     }
 }
 
+pub fn list_backtest_strategies(default_timezone: Tz) -> Vec<StrategyMetadata> {
+    vec![orb_breakout_strategy_metadata(default_timezone)]
+}
+
+pub fn orb_breakout_strategy_metadata(default_timezone: Tz) -> StrategyMetadata {
+    StrategyMetadata {
+        id: "orb_breakout_v1".to_string(),
+        label: "ORB Breakout V1".to_string(),
+        description: "Opening-range breakout strategy using first candle close outside OR.".to_string(),
+        defaults: json!({
+            "name": "ORB Breakout V1",
+            "timeframe": "1m",
+            "ib_minutes": 15,
+            "rth_only": true,
+            "session_start": "09:30:00",
+            "session_end": "16:00:00",
+            "stop_mode": "or_boundary",
+            "tp_r_multiple": 2.0,
+            "entry_mode": "first_outside",
+            "strategy_mode": "breakout_only",
+            "contracts": 1,
+            "timezone": default_timezone.name(),
+        }),
+        params: vec![
+            string_param("symbol_contract", true, None),
+            datetime_param("start"),
+            datetime_param("end"),
+            enum_param("timeframe", true, json!("1m"), ALLOWED_TIMEFRAMES),
+            integer_param("ib_minutes", true, json!(15)),
+            boolean_param("rth_only", true, json!(true)),
+            string_param("session_start", true, Some(json!("09:30:00"))),
+            string_param("session_end", true, Some(json!("16:00:00"))),
+            enum_param("stop_mode", true, json!("or_boundary"), &["or_boundary", "or_mid"]),
+            number_param("tp_r_multiple", true, json!(2.0)),
+            enum_param(
+                "entry_mode",
+                true,
+                json!("first_outside"),
+                &["first_outside", "reentry_after_stop"],
+            ),
+            enum_param(
+                "strategy_mode",
+                true,
+                json!("breakout_only"),
+                &["breakout_only"],
+            ),
+            integer_param("contracts", false, json!(1)),
+            string_param("timezone", false, Some(json!(default_timezone.name()))),
+        ],
+    }
+}
+
 pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<OrbStrategyParams> {
     let get = |key: &str| params.get(key);
     let symbol_contract = get("symbol_contract")
@@ -405,6 +485,14 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
         other => bail!("entry_mode must be 'first_outside' or 'reentry_after_stop', got {other}"),
     };
 
+    let strategy_mode = match get("strategy_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("breakout_only")
+    {
+        "breakout_only" => StrategyMode::BreakoutOnly,
+        other => bail!("strategy_mode must be 'breakout_only', got {other}"),
+    };
+
     let contracts = get("contracts").and_then(Value::as_i64).unwrap_or(1) as i32;
     if contracts <= 0 {
         bail!("contracts must be greater than 0");
@@ -430,6 +518,7 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
         stop_mode,
         tp_r_multiple,
         entry_mode,
+        strategy_mode,
         contracts,
         timezone,
     })
@@ -681,6 +770,71 @@ fn parse_hhmmss(value: &str) -> anyhow::Result<NaiveTime> {
         .with_context(|| format!("invalid HH:MM:SS time: {value}"))
 }
 
+fn string_param(name: &str, required: bool, default: Option<Value>) -> StrategyParamMetadata {
+    StrategyParamMetadata {
+        name: name.to_string(),
+        kind: "string".to_string(),
+        required,
+        default,
+        options: None,
+    }
+}
+
+fn datetime_param(name: &str) -> StrategyParamMetadata {
+    StrategyParamMetadata {
+        name: name.to_string(),
+        kind: "datetime".to_string(),
+        required: true,
+        default: None,
+        options: None,
+    }
+}
+
+fn integer_param(name: &str, required: bool, default: Value) -> StrategyParamMetadata {
+    StrategyParamMetadata {
+        name: name.to_string(),
+        kind: "integer".to_string(),
+        required,
+        default: Some(default),
+        options: None,
+    }
+}
+
+fn number_param(name: &str, required: bool, default: Value) -> StrategyParamMetadata {
+    StrategyParamMetadata {
+        name: name.to_string(),
+        kind: "number".to_string(),
+        required,
+        default: Some(default),
+        options: None,
+    }
+}
+
+fn boolean_param(name: &str, required: bool, default: Value) -> StrategyParamMetadata {
+    StrategyParamMetadata {
+        name: name.to_string(),
+        kind: "boolean".to_string(),
+        required,
+        default: Some(default),
+        options: None,
+    }
+}
+
+fn enum_param(
+    name: &str,
+    required: bool,
+    default: Value,
+    options: &[&str],
+) -> StrategyParamMetadata {
+    StrategyParamMetadata {
+        name: name.to_string(),
+        kind: "enum".to_string(),
+        required,
+        default: Some(default),
+        options: Some(options.iter().map(|value| (*value).to_string()).collect()),
+    }
+}
+
 #[derive(Clone)]
 struct OrLevels {
     or_high: f64,
@@ -831,8 +985,9 @@ fn simulate_exit(
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_orb_params, parse_orb_split_config, simulate_orb_breakout_strategy,
-        summarize_breakout_trades, EntryMode, OrbStrategyParams, StopMode, StrategyBar,
+        list_backtest_strategies, merge_orb_params, parse_orb_split_config,
+        simulate_orb_breakout_strategy, summarize_breakout_trades, EntryMode,
+        OrbStrategyParams, StopMode, StrategyBar,
     };
     use chrono::{TimeZone, Utc};
     use chrono_tz::America::New_York;
@@ -1024,5 +1179,29 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("split.split_at"));
+    }
+
+    #[test]
+    fn invalid_strategy_mode_is_rejected() {
+        let error = merge_orb_params(
+            &json!({
+                "symbol_contract": "NQH6",
+                "start": "2026-02-18T14:30:00Z",
+                "end": "2026-02-18T21:00:00Z",
+                "strategy_mode": "something_else",
+            }),
+            New_York,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("strategy_mode"));
+    }
+
+    #[test]
+    fn strategy_metadata_exposes_orb_params() {
+        let strategies = list_backtest_strategies(New_York);
+        assert_eq!(strategies.len(), 1);
+        assert_eq!(strategies[0].id, "orb_breakout_v1");
+        assert!(strategies[0].params.iter().any(|param| param.name == "strategy_mode"));
     }
 }

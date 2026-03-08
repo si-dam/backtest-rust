@@ -66,7 +66,9 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - ORB simulation runs in `crates/backtest`
   - runs and trades persist in Postgres
   - split runs are supported with paired `[IS]` and `[OOS]` segments from one backtest job payload
-  - the frontend can submit and inspect ORB runs
+  - `GET /api/v1/backtests/strategies` now exposes strategy metadata/defaults for the current runtime
+  - run configs and trades can be exported through `/api/v1/backtests/runs/{id}/export/config.json` and `/api/v1/backtests/runs/{id}/export/trades.csv`
+  - the frontend can submit and inspect ORB runs, then download config/trade exports for the selected run
   - fixture-based parity cases for ORB now live under `crates/backtest/tests/`
   - Postgres-backed integration tests now cover persisted run/trade analytics in `crates/backtest/tests/runtime_store.rs` and the `/api/v1/backtests/*` read/write contract in `apps/api/tests/backtests_api.rs`
 - the first dataset export path now exists:

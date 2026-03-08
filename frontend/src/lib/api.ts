@@ -120,6 +120,22 @@ export interface BacktestAnalytics {
   max_drawdown: number;
 }
 
+export interface StrategyParamMetadata {
+  name: string;
+  type: string;
+  required: boolean;
+  default?: unknown;
+  options?: string[];
+}
+
+export interface StrategyMetadata {
+  id: string;
+  label: string;
+  description: string;
+  defaults: Record<string, unknown>;
+  params: StrategyParamMetadata[];
+}
+
 export interface DatasetExportRecord {
   id: string;
   job_id: string | null;
@@ -156,6 +172,10 @@ async function postJson<TRequest, TResponse>(path: string, payload: TRequest): P
   return (await response.json()) as TResponse;
 }
 
+export function buildApiUrl(path: string) {
+  return `${apiBaseUrl}${path}`;
+}
+
 export function getSymbols() {
   return fetchJson<{ symbols: SymbolRecord[] }>("/symbols");
 }
@@ -189,6 +209,10 @@ export function createBacktestJob(payload: {
   params: Record<string, unknown>;
 }) {
   return postJson<typeof payload, { job_id: string }>("/backtests/jobs", payload);
+}
+
+export function getBacktestStrategies() {
+  return fetchJson<StrategyMetadata[]>("/backtests/strategies");
 }
 
 export function createDatasetJob(payload: {
@@ -242,6 +266,14 @@ export function getBacktestRunTrades(runId: string) {
 
 export function getBacktestRunAnalytics(runId: string) {
   return fetchJson<{ run_id: string; analytics: BacktestAnalytics }>(`/backtests/runs/${runId}/analytics`);
+}
+
+export function getBacktestRunConfigExportUrl(runId: string) {
+  return buildApiUrl(`/backtests/runs/${runId}/export/config.json`);
+}
+
+export function getBacktestRunTradesExportUrl(runId: string) {
+  return buildApiUrl(`/backtests/runs/${runId}/export/trades.csv`);
 }
 
 export function createMarketRebuildJobs(

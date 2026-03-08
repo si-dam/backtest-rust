@@ -43,11 +43,13 @@
   - rebuild jobs can target bars, profiles, or large-order overlays independently
 - The first strategy path now exists in Rust:
   - `POST /api/v1/backtests/jobs` can queue `orb_breakout_v1`
+  - `GET /api/v1/backtests/strategies` exposes runtime strategy metadata and defaults
   - `runtime-worker` loads persisted time bars from ClickHouse and runs the ORB engine in `crates/backtest`
   - a single ORB job can optionally split the requested window into `[IS]` and `[OOS]` runs with shared split metadata
   - run metadata and trades persist to Postgres and are exposed through `/api/v1/backtests/runs/*`
+  - run config and trade exports are exposed through `/api/v1/backtests/runs/{id}/export/config.json` and `/api/v1/backtests/runs/{id}/export/trades.csv`
   - `crates/backtest/tests/fixtures/` contains reference-style ORB cases used to keep the Rust implementation aligned with the Python behavior
-  - Postgres-backed integration tests now cover persisted backtest store behavior plus the `/api/v1/backtests/jobs`, `/runs`, `/runs/{id}`, `/trades`, and `/analytics` contract without requiring ClickHouse access
+  - Postgres-backed integration tests now cover persisted backtest store behavior plus the `/api/v1/backtests/jobs`, `/strategies`, `/runs`, `/runs/{id}`, `/trades`, `/analytics`, and export contract without requiring ClickHouse access
 - The first dataset export path now exists:
   - `POST /api/v1/datasets/jobs` supports `export_kind = "bars"`, `export_kind = "ticks"`, `export_kind = "preset_profiles"`, and `export_kind = "backtest_trades"`
   - the worker reads persisted bars, ticks, or preset profile segments from ClickHouse, or persisted run trades from Postgres, writes Parquet plus a manifest under `artifacts/`, and records the export in Postgres

@@ -92,6 +92,34 @@ async fn create_backtest_job_enqueues_runtime_job() -> Result<()> {
 }
 
 #[tokio::test]
+async fn list_backtest_strategies_returns_orb_metadata() -> Result<()> {
+    let Some((_pool, settings)) = test_pool_and_settings().await? else {
+        return Ok(());
+    };
+
+    let app = build_router(settings).await?;
+    let response = app
+        .oneshot(Request::builder().uri("/api/v1/backtests/strategies").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = json_body(response).await?;
+    let strategies = body.as_array().expect("strategies response should be an array");
+    let orb = strategies
+        .iter()
+        .find(|strategy| strategy["id"] == "orb_breakout_v1")
+        .expect("orb strategy should exist");
+    assert_eq!(orb["label"], "ORB Breakout V1");
+    assert!(orb["params"]
+        .as_array()
+        .expect("strategy params should be an array")
+        .iter()
+        .any(|param| param["name"] == "strategy_mode"));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn backtest_routes_serve_persisted_run_trade_and_analytics_data() -> Result<()> {
     let Some((pool, settings)) = test_pool_and_settings().await? else {
         return Ok(());
@@ -179,6 +207,7 @@ async fn backtest_routes_serve_persisted_run_trade_and_analytics_data() -> Resul
     assert_eq!(trades_body["trades"].as_array().map(Vec::len), Some(2));
 
     let analytics_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/api/v1/backtests/runs/{}/analytics", run.id))
@@ -192,6 +221,39 @@ async fn backtest_routes_serve_persisted_run_trade_and_analytics_data() -> Resul
     assert_eq!(analytics_body["analytics"]["wins"], 1);
     assert_eq!(analytics_body["analytics"]["losses"], 1);
     assert_eq!(analytics_body["analytics"]["total_pnl"], 2.5);
+
+    let config_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/backtests/runs/{}/export/config.json", run.id))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(config_response.status(), StatusCode::OK);
+    let config_body = json_body(config_response).await?;
+    assert_eq!(config_body["run_id"], json!(run.id));
+    assert_eq!(config_body["strategy_id"], "orb_breakout_v1");
+
+    let csv_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/backtests/runs/{}/export/trades.csv", run.id))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(csv_response.status(), StatusCode::OK);
+    let content_type = csv_response
+        .headers()
+        .get("content-type")
+        .expect("csv response should have content type")
+        .to_str()?;
+    assert!(content_type.starts_with("text/csv"));
+    let csv_bytes = to_bytes(csv_response.into_body(), usize::MAX).await?;
+    let csv_text = String::from_utf8(csv_bytes.to_vec())?;
+    assert!(csv_text.contains("symbol_contract"));
+    assert!(csv_text.contains("exit_reason"));
+    assert!(csv_text.contains("r_multiple"));
 
     Ok(())
 }

@@ -7,15 +7,16 @@ use app_core::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
-use backtest::{BacktestJobRequest, PgBacktestStore};
+use backtest::{list_backtest_strategies, BacktestJobRequest, BacktestTradeRecord, PgBacktestStore};
 use jobs::{CreateJobInput, JobSubmitted, JobType, ListDatasetExportsInput, ListJobsInput, PgJobStore};
 use market::{AreaProfileQuery, BarsQuery, ClickHouseMarketStore, LargeOrdersQuery, PresetProfileQuery, TicksQuery};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sqlx::postgres::PgPoolOptions;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
@@ -104,10 +105,13 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
         .route("/markets/:symbol/profiles/preset", get(get_preset_profiles))
         .route("/markets/:symbol/profiles/area", get(get_area_profile))
         .route("/backtests/jobs", post(create_backtest_job))
+        .route("/backtests/strategies", get(list_strategies))
         .route("/backtests/runs", get(list_backtest_runs))
         .route("/backtests/runs/:run_id", get(get_backtest_run))
         .route("/backtests/runs/:run_id/trades", get(get_backtest_trades))
         .route("/backtests/runs/:run_id/analytics", get(get_backtest_analytics))
+        .route("/backtests/runs/:run_id/export/config.json", get(export_backtest_config))
+        .route("/backtests/runs/:run_id/export/trades.csv", get(export_backtest_trades_csv))
         .route("/datasets/jobs", post(create_dataset_job))
         .route("/datasets/exports", get(list_dataset_exports))
         .with_state(state.clone());
@@ -368,6 +372,12 @@ async fn create_backtest_job(
     Ok((StatusCode::ACCEPTED, Json(JobSubmitted { job_id: job.id })))
 }
 
+async fn list_strategies(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!(list_backtest_strategies(
+        state.settings.dataset_timezone,
+    ))))
+}
+
 async fn list_backtest_runs(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let runs = state
         .backtests
@@ -403,6 +413,60 @@ async fn get_backtest_analytics(State(state): State<AppState>, Path(run_id): Pat
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(json!({ "run_id": run_id, "analytics": analytics })))
+}
+
+async fn export_backtest_config(
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let run = state
+        .backtests
+        .get_run(run_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("run not found"))?;
+
+    Ok(Json(json!({
+        "run_id": run.id,
+        "name": run.name,
+        "strategy_id": run.strategy_id,
+        "params": run.params_json,
+        "status": run.status,
+        "created_at": run.created_at,
+    })))
+}
+
+async fn export_backtest_trades_csv(
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+) -> ApiResult<Response> {
+    let run = state
+        .backtests
+        .get_run(run_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| ApiError::not_found("run not found"))?;
+    let trades = state
+        .backtests
+        .get_run_trades(run.id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let csv_body = encode_backtest_trades_csv(&trades)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+
+    let mut response = Response::new(csv_body.into());
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"backtest-run-{run_id}-trades.csv\""))
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+    );
+
+    Ok(response)
 }
 
 async fn create_dataset_job(
@@ -445,4 +509,83 @@ async fn list_dataset_exports(
 
 fn default_rebuild_target() -> String {
     "all".to_string()
+}
+
+fn encode_backtest_trades_csv(trades: &[BacktestTradeRecord]) -> anyhow::Result<String> {
+    let mut note_columns = std::collections::BTreeSet::new();
+    let decoded_notes = trades
+        .iter()
+        .map(|trade| {
+            let notes = flattenable_notes(&trade.notes_json);
+            note_columns.extend(notes.keys().cloned());
+            notes
+        })
+        .collect::<Vec<_>>();
+
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    let mut headers = vec![
+        "id".to_string(),
+        "run_id".to_string(),
+        "symbol_contract".to_string(),
+        "entry_ts".to_string(),
+        "exit_ts".to_string(),
+        "entry_price".to_string(),
+        "exit_price".to_string(),
+        "qty".to_string(),
+        "pnl".to_string(),
+        "side".to_string(),
+        "notes_json".to_string(),
+    ];
+    headers.extend(note_columns.iter().cloned());
+    writer.write_record(&headers)?;
+
+    for (trade, notes) in trades.iter().zip(decoded_notes.iter()) {
+        let mut row = vec![
+            trade.id.to_string(),
+            trade.run_id.to_string(),
+            trade.symbol_contract.clone(),
+            trade.entry_ts.map(|value| value.to_rfc3339()).unwrap_or_default(),
+            trade.exit_ts.map(|value| value.to_rfc3339()).unwrap_or_default(),
+            trade.entry_price.map(|value| value.to_string()).unwrap_or_default(),
+            trade.exit_price.map(|value| value.to_string()).unwrap_or_default(),
+            trade.qty.map(|value| value.to_string()).unwrap_or_default(),
+            trade.pnl.map(|value| value.to_string()).unwrap_or_default(),
+            trade_side(trade).to_string(),
+            serde_json::to_string(&trade.notes_json)?,
+        ];
+        row.extend(
+            note_columns
+                .iter()
+                .map(|key| value_to_csv_cell(notes.get(key))),
+        );
+        writer.write_record(&row)?;
+    }
+
+    let bytes = writer.into_inner().map_err(|error| error.into_error())?;
+    String::from_utf8(bytes).map_err(Into::into)
+}
+
+fn flattenable_notes(notes: &Value) -> Map<String, Value> {
+    match notes {
+        Value::Object(values) => values.clone(),
+        _ => Map::new(),
+    }
+}
+
+fn trade_side(trade: &BacktestTradeRecord) -> &'static str {
+    match trade.qty.unwrap_or_default().partial_cmp(&0.0) {
+        Some(std::cmp::Ordering::Greater) => "long",
+        Some(std::cmp::Ordering::Less) => "short",
+        _ => "flat",
+    }
+}
+
+fn value_to_csv_cell(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Null) | None => String::new(),
+        Some(Value::String(inner)) => inner.clone(),
+        Some(Value::Bool(inner)) => inner.to_string(),
+        Some(Value::Number(inner)) => inner.to_string(),
+        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+    }
 }

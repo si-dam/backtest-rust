@@ -1838,6 +1838,7 @@ dependencies = [
  "backtest",
  "chrono",
  "chrono-tz",
+ "csv",
  "jobs",
  "market",
  "serde",

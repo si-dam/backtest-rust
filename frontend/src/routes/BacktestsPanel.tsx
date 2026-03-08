@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  getBacktestRunConfigExportUrl,
   createBacktestJob,
   getBacktestRun,
   getBacktestRunAnalytics,
   getBacktestRuns,
+  getBacktestRunTradesExportUrl,
+  getBacktestStrategies,
   getBacktestRunTrades,
   getJob,
   type BacktestRunRecord,
@@ -41,6 +44,12 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
     queryKey: ["backtest-runs"],
     queryFn: getBacktestRuns,
     refetchInterval: 4000,
+  });
+
+  const strategiesQuery = useQuery({
+    queryKey: ["backtest-strategies"],
+    queryFn: getBacktestStrategies,
+    staleTime: 60_000,
   });
 
   const filteredRuns = (runsQuery.data?.runs ?? []).filter((run) => {
@@ -157,6 +166,7 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
   const latestJobSummary = summarizeJobResult(jobQuery.data);
   const selectedSymbolFromRun =
     typeof selectedParams.symbol_contract === "string" ? selectedParams.symbol_contract : null;
+  const activeStrategy = strategiesQuery.data?.find((strategy) => strategy.id === "orb_breakout_v1");
 
   function applySelectedRunParams() {
     if (!selectedRun) {
@@ -299,6 +309,7 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
         {splitEnabled ? (
           <p className="microcopy">Leave split time blank to split the selected window at its midpoint.</p>
         ) : null}
+        {activeStrategy ? <p className="microcopy">{activeStrategy.description}</p> : null}
         {createJobMutation.isError ? <p className="error-copy">{createJobMutation.error.message}</p> : null}
         {latestJobSummary ? (
           <div className="job-card">
@@ -399,6 +410,22 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
               <button className="secondary-button" onClick={applySelectedRunParams} type="button">
                 Load selected run into form
               </button>
+              <a
+                className="secondary-button"
+                href={getBacktestRunConfigExportUrl(selectedRun.id)}
+                rel="noreferrer"
+                target="_blank"
+              >
+                Config JSON
+              </a>
+              <a
+                className="secondary-button"
+                href={getBacktestRunTradesExportUrl(selectedRun.id)}
+                rel="noreferrer"
+                target="_blank"
+              >
+                Trades CSV
+              </a>
               {selectedSymbolFromRun && selectedSymbolFromRun !== selectedSymbol ? (
                 <span className="microcopy">Run symbol: {selectedSymbolFromRun}</span>
               ) : null}
