@@ -73,6 +73,7 @@ This repo now contains the phase-1 foundation and an in-progress phase-2 market-
   - runs and trades persist in Postgres
   - `POST /api/v1/backtests/jobs` now supports both `mode: "run"` and `mode: "sweep"`
   - sweep jobs can fan out one ORB config across multiple symbols while keeping one job/result envelope
+  - ORB now supports both `strategy_mode: "breakout_only"` and `strategy_mode: "big_order_required"`, with strict mode deriving big-print confirmation from ticks at the requested threshold during simulation
   - split runs are supported with paired `[IS]` and `[OOS]` segments from one backtest job payload
   - `GET /api/v1/backtests/strategies` now exposes strategy metadata/defaults for the current runtime
   - run configs and trades can be exported through `/api/v1/backtests/runs/{id}/export/config.json` and `/api/v1/backtests/runs/{id}/export/trades.csv`

@@ -10,15 +10,16 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use backtest::{
     build_trade_records, merge_orb_params, parse_orb_split_config, simulate_orb_breakout_strategy,
     summarize_breakout_trades, BacktestTradeRecord, NewRunInput, OrbRunSummary, PgBacktestStore,
-    StrategyBar,
+    StrategyBar, StrategyMode,
 };
 use chrono::{DateTime, Utc};
 use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
 use market::{
     build_large_orders_from_ticks, build_non_time_bars_from_ticks, build_profiles_for_ticks,
     build_time_bars_from_ticks, derive_symbol_root, detect_tick_size, parse_market_data_file,
-    sha256_hex, summarize_parsed_data, BarRecord, BarsQuery, CanonicalTick, CanonicalTickRow,
-    ClickHouseMarketStore, ParsedMarketData, PresetProfileQuery, TicksQuery,
+    sha256_hex, summarize_parsed_data, timeframe_to_seconds, BarRecord, BarsQuery, CanonicalTick,
+    CanonicalTickRow, ClickHouseMarketStore, LargeOrderRow, ParsedMarketData,
+    PresetProfileQuery, TicksQuery,
 };
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
@@ -917,7 +918,41 @@ async fn run_orb_backtest(
         )
         .await
         .map_err(|error| format!("failed to load backtest bars: {error}"))?;
-    let strategy_bars = bars_to_strategy_bars(&bars);
+    let mut strategy_bars = bars_to_strategy_bars(&bars);
+    if params.strategy_mode == StrategyMode::BigOrderRequired {
+        update_stage(
+            jobs,
+            job_id,
+            worker_id,
+            "loading_backtest_ticks",
+            json!({
+                "run_id": run_id,
+                "symbol_contract": params.symbol_contract,
+                "threshold": params.big_trade_threshold,
+            }),
+        )
+        .await?;
+        let tick_rows = market
+            .load_ticks(
+                &params.symbol_contract,
+                &TicksQuery {
+                    start: params.start,
+                    end: params.end,
+                    limit: u32::MAX,
+                },
+            )
+            .await
+            .map_err(|error| format!("failed to load backtest ticks: {error}"))?;
+        let ticks = tick_rows_to_canonical(&tick_rows);
+        let large_orders = build_large_orders_from_ticks(
+            &params.symbol_contract,
+            &ticks,
+            "fixed",
+            params.big_trade_threshold,
+        );
+        annotate_strategy_bars_with_large_orders(&mut strategy_bars, &large_orders, &params.timeframe)
+            .map_err(|error| format!("failed to annotate strategy bars with large orders: {error}"))?;
+    }
 
     update_stage(
         jobs,
@@ -1838,8 +1873,39 @@ fn bars_to_strategy_bars(rows: &[BarRecord]) -> Vec<StrategyBar> {
             low: row.low,
             close: row.close,
             volume: row.volume,
+            has_big_buy: false,
+            has_big_sell: false,
         })
         .collect()
+}
+
+fn annotate_strategy_bars_with_large_orders(
+    bars: &mut [StrategyBar],
+    large_orders: &[LargeOrderRow],
+    timeframe: &str,
+) -> std::result::Result<(), String> {
+    let timeframe_seconds = timeframe_to_seconds(timeframe)
+        .map_err(|error| format!("unsupported timeframe for large-order annotation: {error}"))? as i64;
+    let mut order_index = 0usize;
+
+    for bar in bars.iter_mut() {
+        let window_end = bar.ts + chrono::Duration::seconds(timeframe_seconds);
+        while order_index < large_orders.len() && large_orders[order_index].ts < bar.ts {
+            order_index += 1;
+        }
+
+        let mut scan_index = order_index;
+        while scan_index < large_orders.len() && large_orders[scan_index].ts < window_end {
+            match large_orders[scan_index].side.as_str() {
+                "buy" => bar.has_big_buy = true,
+                "sell" => bar.has_big_sell = true,
+                _ => {}
+            }
+            scan_index += 1;
+        }
+    }
+
+    Ok(())
 }
 
 fn write_bars_parquet(path: &PathBuf, rows: &[BarRecord]) -> anyhow::Result<()> {

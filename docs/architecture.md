@@ -50,6 +50,7 @@
   - `POST /api/v1/backtests/jobs` can queue `orb_breakout_v1` in either `run` or `sweep` mode
   - `GET /api/v1/backtests/strategies` exposes runtime strategy metadata and defaults
   - `runtime-worker` loads persisted time bars from ClickHouse and runs the ORB engine in `crates/backtest`
+  - when ORB runs in `strategy_mode = "big_order_required"`, the worker also derives large-order confirmations from ticks at the requested threshold before signal selection
   - a single ORB job can optionally split the requested window into `[IS]` and `[OOS]` runs with shared split metadata
   - sweep jobs can fan one ORB configuration across multiple symbols and optional period windows while returning one job result summary
   - run metadata and trades persist to Postgres and are exposed through `/api/v1/backtests/runs/*`

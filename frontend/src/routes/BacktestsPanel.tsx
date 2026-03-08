@@ -26,6 +26,8 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
   const [ibMinutes, setIbMinutes] = useState("15");
   const [stopMode, setStopMode] = useState("or_boundary");
   const [entryMode, setEntryMode] = useState("first_outside");
+  const [strategyMode, setStrategyMode] = useState("breakout_only");
+  const [bigTradeThreshold, setBigTradeThreshold] = useState("25");
   const [tpMultiple, setTpMultiple] = useState("2");
   const [contracts, setContracts] = useState("1");
   const [timezone, setTimezone] = useState("America/New_York");
@@ -105,6 +107,8 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
           stop_mode: stopMode,
           tp_r_multiple: Number(tpMultiple),
           entry_mode: entryMode,
+          strategy_mode: strategyMode,
+          big_trade_threshold: Number(bigTradeThreshold),
           contracts: Number(contracts),
           timezone,
           session_start: sessionStart,
@@ -189,6 +193,8 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
     setIbMinutes(String(params.ib_minutes ?? 15));
     setStopMode(typeof params.stop_mode === "string" ? params.stop_mode : "or_boundary");
     setEntryMode(typeof params.entry_mode === "string" ? params.entry_mode : "first_outside");
+    setStrategyMode(typeof params.strategy_mode === "string" ? params.strategy_mode : "breakout_only");
+    setBigTradeThreshold(String(params.big_trade_threshold ?? 25));
     setTpMultiple(String(params.tp_r_multiple ?? 2));
     setContracts(String(params.contracts ?? 1));
     setTimezone(typeof params.timezone === "string" ? params.timezone : "America/New_York");
@@ -267,6 +273,22 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
               <option value="first_outside">First outside</option>
               <option value="reentry_after_stop">Reentry after stop</option>
             </select>
+          </label>
+          <label className="field">
+            <span className="field-label">Strategy mode</span>
+            <select className="field-input" value={strategyMode} onChange={(event) => setStrategyMode(event.target.value)}>
+              <option value="breakout_only">Breakout only</option>
+              <option value="big_order_required">Big order required</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">Big trade threshold</span>
+            <input
+              className="field-input"
+              disabled={strategyMode !== "big_order_required"}
+              value={bigTradeThreshold}
+              onChange={(event) => setBigTradeThreshold(event.target.value)}
+            />
           </label>
           <label className="field">
             <span className="field-label">TP multiple</span>
@@ -482,7 +504,13 @@ export default function BacktestsPanel({ selectedSymbol }: BacktestsPanelProps) 
                 <span className="metric-label">Risk model</span>
                 <strong>{String(selectedParams.stop_mode ?? "or_boundary")}</strong>
                 <p className="microcopy">
-                  TP {formatMaybeNumber(selectedParams.tp_r_multiple)}R • {String(selectedParams.contracts ?? 1)} contract(s)
+                  {String(selectedParams.strategy_mode ?? "breakout_only")}
+                  {" • "}
+                  threshold {String(selectedParams.big_trade_threshold ?? 25)}
+                  {" • "}
+                  TP {formatMaybeNumber(selectedParams.tp_r_multiple)}R
+                  {" • "}
+                  {String(selectedParams.contracts ?? 1)} contract(s)
                 </p>
               </div>
               <div className="detail-card">

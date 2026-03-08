@@ -78,6 +78,7 @@ pub enum EntryMode {
 #[serde(rename_all = "snake_case")]
 pub enum StrategyMode {
     BreakoutOnly,
+    BigOrderRequired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +111,7 @@ pub struct OrbStrategyParams {
     pub tp_r_multiple: f64,
     pub entry_mode: EntryMode,
     pub strategy_mode: StrategyMode,
+    pub big_trade_threshold: f64,
     pub contracts: i32,
     pub timezone: String,
 }
@@ -143,6 +145,10 @@ pub struct StrategyBar {
     pub low: f64,
     pub close: f64,
     pub volume: f64,
+    #[serde(default)]
+    pub has_big_buy: bool,
+    #[serde(default)]
+    pub has_big_sell: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -392,6 +398,7 @@ pub fn orb_breakout_strategy_metadata(default_timezone: Tz) -> StrategyMetadata 
             "tp_r_multiple": 2.0,
             "entry_mode": "first_outside",
             "strategy_mode": "breakout_only",
+            "big_trade_threshold": 25,
             "contracts": 1,
             "timezone": default_timezone.name(),
         }),
@@ -416,8 +423,9 @@ pub fn orb_breakout_strategy_metadata(default_timezone: Tz) -> StrategyMetadata 
                 "strategy_mode",
                 true,
                 json!("breakout_only"),
-                &["breakout_only"],
+                &["breakout_only", "big_order_required"],
             ),
+            integer_param("big_trade_threshold", true, json!(25)),
             integer_param("contracts", false, json!(1)),
             string_param("timezone", false, Some(json!(default_timezone.name()))),
         ],
@@ -496,8 +504,17 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
         .unwrap_or("breakout_only")
     {
         "breakout_only" => StrategyMode::BreakoutOnly,
-        other => bail!("strategy_mode must be 'breakout_only', got {other}"),
+        "big_order_required" => StrategyMode::BigOrderRequired,
+        other => bail!("strategy_mode must be 'breakout_only' or 'big_order_required', got {other}"),
     };
+
+    let big_trade_threshold = get("big_trade_threshold")
+        .and_then(Value::as_f64)
+        .or_else(|| get("big_trade_threshold").and_then(Value::as_i64).map(|value| value as f64))
+        .unwrap_or(25.0);
+    if big_trade_threshold <= 0.0 {
+        bail!("big_trade_threshold must be greater than 0");
+    }
 
     let contracts = get("contracts").and_then(Value::as_i64).unwrap_or(1) as i32;
     if contracts <= 0 {
@@ -525,6 +542,7 @@ pub fn merge_orb_params(params: &Value, default_timezone: Tz) -> anyhow::Result<
         tp_r_multiple,
         entry_mode,
         strategy_mode,
+        big_trade_threshold,
         contracts,
         timezone,
     })
@@ -587,7 +605,14 @@ pub fn simulate_orb_breakout_strategy(
         let mut search_after: Option<DateTime<Utc>> = None;
         loop {
             let Some((entry_ts, side)) =
-                find_first_breakout_signal(&day_bars, &levels, session_end, timezone, search_after)
+                find_first_breakout_signal(
+                    &day_bars,
+                    &levels,
+                    session_end,
+                    timezone,
+                    search_after,
+                    params.strategy_mode == StrategyMode::BigOrderRequired,
+                )
             else {
                 break;
             };
@@ -917,6 +942,7 @@ fn find_first_breakout_signal(
     session_end: NaiveTime,
     timezone: Tz,
     start_after: Option<DateTime<Utc>>,
+    require_big_trade: bool,
 ) -> Option<(DateTime<Utc>, Side)> {
     let start_ts = start_after.map_or(levels.ib_end, |value| value.max(levels.ib_end));
     for bar in day_bars.iter().filter(|bar| {
@@ -924,9 +950,15 @@ fn find_first_breakout_signal(
         bar.ts > start_ts && local.time() <= session_end
     }) {
         if bar.close > levels.or_high {
+            if require_big_trade && !bar.has_big_buy {
+                return None;
+            }
             return Some((bar.ts, Side::Long));
         }
         if bar.close < levels.or_low {
+            if require_big_trade && !bar.has_big_sell {
+                return None;
+            }
             return Some((bar.ts, Side::Short));
         }
     }
@@ -993,7 +1025,7 @@ mod tests {
     use super::{
         list_backtest_strategies, merge_orb_params, parse_orb_split_config,
         simulate_orb_breakout_strategy, summarize_breakout_trades, EntryMode,
-        OrbStrategyParams, StopMode, StrategyBar,
+        OrbStrategyParams, StopMode, StrategyBar, StrategyMode,
     };
     use chrono::{TimeZone, Utc};
     use chrono_tz::America::New_York;
@@ -1026,6 +1058,8 @@ mod tests {
                 low: 99.0,
                 close: 100.0,
                 volume: 10.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 0).unwrap(),
@@ -1034,6 +1068,8 @@ mod tests {
                 low: 100.0,
                 close: 102.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 33, 0).unwrap(),
@@ -1042,6 +1078,8 @@ mod tests {
                 low: 101.0,
                 close: 106.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 34, 0).unwrap(),
@@ -1050,6 +1088,8 @@ mod tests {
                 low: 105.0,
                 close: 106.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
         ]
     }
@@ -1063,6 +1103,8 @@ mod tests {
                 low: 99.0,
                 close: 100.0,
                 volume: 10.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 32, 0).unwrap(),
@@ -1071,6 +1113,8 @@ mod tests {
                 low: 101.0,
                 close: 102.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 33, 0).unwrap(),
@@ -1079,6 +1123,8 @@ mod tests {
                 low: 98.0,
                 close: 99.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 34, 0).unwrap(),
@@ -1087,6 +1133,8 @@ mod tests {
                 low: 97.0,
                 close: 98.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 35, 0).unwrap(),
@@ -1095,6 +1143,8 @@ mod tests {
                 low: 95.0,
                 close: 96.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
             StrategyBar {
                 ts: Utc.with_ymd_and_hms(2026, 2, 18, 14, 36, 0).unwrap(),
@@ -1103,6 +1153,8 @@ mod tests {
                 low: 91.0,
                 close: 92.0,
                 volume: 20.0,
+                has_big_buy: false,
+                has_big_sell: false,
             },
         ]
     }
@@ -1209,5 +1261,19 @@ mod tests {
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].id, "orb_breakout_v1");
         assert!(strategies[0].params.iter().any(|param| param.name == "strategy_mode"));
+    }
+
+    #[test]
+    fn big_order_required_rejects_breakout_without_big_print() {
+        let mut params = base_params();
+        params.strategy_mode = StrategyMode::BigOrderRequired;
+        let trades = simulate_orb_breakout_strategy(&bars(), &params).unwrap();
+        assert!(trades.is_empty());
+
+        let mut bars = bars();
+        bars[1].has_big_buy = true;
+        let trades = simulate_orb_breakout_strategy(&bars, &params).unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].side, "long");
     }
 }
