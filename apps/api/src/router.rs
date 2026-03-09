@@ -6,7 +6,7 @@ use app_core::{
     error::{ApiError, ApiResult},
 };
 use axum::{
-    extract::{Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderName, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::Response,
@@ -22,6 +22,7 @@ use market::{AreaProfileQuery, BarsQuery, ClickHouseMarketStore, LargeOrdersQuer
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sqlx::postgres::PgPoolOptions;
+use tokio::io::AsyncWriteExt;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
@@ -111,7 +112,10 @@ pub async fn build_router(settings: Settings) -> Result<Router> {
 
     let api_v1 = Router::new()
         .route("/ingestion/jobs", post(create_ingestion_job))
-        .route("/ingestion/uploads/jobs", post(upload_ingestion_job))
+        .route(
+            "/ingestion/uploads/jobs",
+            post(upload_ingestion_job).layer(DefaultBodyLimit::disable()),
+        )
         .route("/ingestion/files", get(list_ingested_files))
         .route("/jobs", get(list_jobs))
         .route("/jobs/{job_id}", get(get_job))
@@ -237,7 +241,7 @@ async fn upload_ingestion_job(
     let mut symbol_contract: Option<String> = None;
     let mut rebuild = false;
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|error| ApiError::bad_request(format!("invalid multipart request: {error}")))?
@@ -253,18 +257,32 @@ async fn upload_ingestion_job(
                     .map(sanitize_upload_filename)
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "upload.dat".to_string());
-                let bytes = field
-                    .bytes()
+                let stored_path = upload_root.join(format!("{}-{}", Uuid::new_v4(), file_name));
+                let mut file = tokio::fs::File::create(&stored_path)
                     .await
-                    .map_err(|error| ApiError::bad_request(format!("failed to read upload: {error}")))?;
-                if bytes.is_empty() {
+                    .map_err(|error| ApiError::internal(format!("failed to create upload file: {error}")))?;
+                let mut wrote_any_bytes = false;
+
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|error| ApiError::bad_request(format!("failed to read upload: {error}")))?
+                {
+                    wrote_any_bytes = true;
+                    file.write_all(&chunk)
+                        .await
+                        .map_err(|error| ApiError::internal(format!("failed to persist upload: {error}")))?;
+                }
+
+                file.flush()
+                    .await
+                    .map_err(|error| ApiError::internal(format!("failed to finalize upload: {error}")))?;
+
+                if !wrote_any_bytes {
+                    let _ = tokio::fs::remove_file(&stored_path).await;
                     return Err(ApiError::bad_request("uploaded file is empty"));
                 }
 
-                let stored_path = upload_root.join(format!("{}-{}", Uuid::new_v4(), file_name));
-                tokio::fs::write(&stored_path, &bytes)
-                    .await
-                    .map_err(|error| ApiError::internal(format!("failed to persist upload: {error}")))?;
                 uploaded_path = Some(stored_path);
             }
             "symbol_contract" => {

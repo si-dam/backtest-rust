@@ -10,7 +10,9 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use clickhouse::{error::Error as ClickHouseError, Client, Row};
 use profiles::{bucket_price, build_preset_profiles, build_value_area, classify_side};
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -32,12 +34,24 @@ pub use ingest::{
 #[derive(Clone)]
 pub struct ClickHouseMarketStore {
     client: Client,
+    http: HttpClient,
+    base_url: String,
+    database: String,
 }
 
 impl ClickHouseMarketStore {
     pub fn new(base_url: &str, database: &str) -> Self {
-        let client = Client::default().with_url(base_url).with_database(database);
-        Self { client }
+        let client = Client::default()
+            .with_url(base_url)
+            .with_database(database)
+            .with_option("async_insert", "0")
+            .with_option("wait_for_async_insert", "0");
+        Self {
+            client,
+            http: HttpClient::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            database: database.to_string(),
+        }
     }
 
     pub async fn ping(&self) -> Result<(), ApiError> {
@@ -70,15 +84,15 @@ impl ClickHouseMarketStore {
                 SELECT ts, session_date, symbol_contract, trade_price, trade_size, bid_price, ask_price
                 FROM ticks
                 WHERE symbol_contract = ?
-                  AND ts >= ?
-                  AND ts <= ?
+                  AND ts >= parseDateTime64BestEffort(?)
+                  AND ts <= parseDateTime64BestEffort(?)
                 ORDER BY ts
                 LIMIT ?
                 "#,
             )
             .bind(symbol)
-            .bind(query.start)
-            .bind(query.end)
+            .bind(format_clickhouse_timestamp(query.start))
+            .bind(format_clickhouse_timestamp(query.end))
             .bind(query.limit as u64)
             .fetch_all::<TickRecord>()
             .await
@@ -99,16 +113,16 @@ impl ClickHouseMarketStore {
                     FROM bars_time
                     WHERE symbol_contract = ?
                       AND timeframe = ?
-                      AND ts >= ?
-                      AND ts <= ?
+                      AND ts >= parseDateTime64BestEffort(?)
+                      AND ts <= parseDateTime64BestEffort(?)
                     ORDER BY ts
                     LIMIT ?
                     "#,
                 )
                 .bind(symbol)
                 .bind(query.timeframe.clone())
-                .bind(query.start)
-                .bind(query.end)
+                .bind(format_clickhouse_timestamp(query.start))
+                .bind(format_clickhouse_timestamp(query.end))
                 .bind(query.limit as u64)
                 .fetch_all::<BarRecord>()
                 .await
@@ -137,8 +151,8 @@ impl ClickHouseMarketStore {
                 WHERE symbol_contract = ?
                   AND bar_type = ?
                   AND bar_size = ?
-                  AND ts >= ?
-                  AND ts <= ?
+                  AND ts >= parseDateTime64BestEffort(?)
+                  AND ts <= parseDateTime64BestEffort(?)
                 ORDER BY ts
                 LIMIT ?
                 "#,
@@ -146,8 +160,8 @@ impl ClickHouseMarketStore {
             .bind(symbol)
             .bind(query.bar_type.clone())
             .bind(size)
-            .bind(query.start)
-            .bind(query.end)
+            .bind(format_clickhouse_timestamp(query.start))
+            .bind(format_clickhouse_timestamp(query.end))
             .bind(query.limit as u64)
             .fetch_all::<BarRecord>()
             .await
@@ -167,8 +181,8 @@ impl ClickHouseMarketStore {
                 WHERE symbol_contract = ?
                   AND method = ?
                   AND threshold = ?
-                  AND ts >= ?
-                  AND ts <= ?
+                  AND ts >= parseDateTime64BestEffort(?)
+                  AND ts <= parseDateTime64BestEffort(?)
                 ORDER BY ts
                 LIMIT ?
                 "#,
@@ -176,8 +190,8 @@ impl ClickHouseMarketStore {
             .bind(symbol)
             .bind(query.method.clone())
             .bind(query.fixed_threshold)
-            .bind(query.start)
-            .bind(query.end)
+            .bind(format_clickhouse_timestamp(query.start))
+            .bind(format_clickhouse_timestamp(query.end))
             .bind(query.limit as u64)
             .fetch_all::<LargeOrderRecord>()
             .await
@@ -216,8 +230,8 @@ impl ClickHouseMarketStore {
                   AND preset = ?
                   AND metric = ?
                   AND profile_timezone = ?
-                  AND segment_end >= ?
-                  AND segment_start <= ?
+                  AND segment_end >= parseDateTime64BestEffort(?)
+                  AND segment_start <= parseDateTime64BestEffort(?)
                 ORDER BY segment_end
                 LIMIT ?
                 "#,
@@ -226,8 +240,8 @@ impl ClickHouseMarketStore {
             .bind(query.preset.clone())
             .bind(query.metric.clone())
             .bind(query.timezone.clone())
-            .bind(query.start)
-            .bind(query.end)
+            .bind(format_clickhouse_timestamp(query.start))
+            .bind(format_clickhouse_timestamp(query.end))
             .bind(query.max_segments as u64)
             .fetch_all::<ProfileSegmentRow>()
             .await
@@ -382,24 +396,23 @@ impl ClickHouseMarketStore {
     }
 
     pub async fn insert_ticks(&self, rows: &[CanonicalTickRow]) -> anyhow::Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let mut insert = self
-            .client
-            .insert("ticks")
-            .context("failed to create tick insert")?;
-        for row in rows {
-            insert
-                .write(row)
-                .await
-                .context("failed to write tick row")?;
-        }
-        insert
-            .end()
-            .await
-            .context("failed to finalize tick insert")?;
-        Ok(())
+        let tick_rows = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "ts": format_clickhouse_timestamp(row.ts),
+                    "trading_day": format_clickhouse_date(row.trading_day),
+                    "session_date": format_clickhouse_date(row.session_date),
+                    "symbol_contract": row.symbol_contract,
+                    "trade_price": row.trade_price,
+                    "trade_size": row.trade_size,
+                    "bid_price": row.bid_price,
+                    "ask_price": row.ask_price,
+                    "source_file": row.source_file,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.insert_json_each_row("ticks", &tick_rows).await
     }
 
     pub async fn delete_ticks_by_source(&self, source_file: &str) -> anyhow::Result<()> {
@@ -413,24 +426,25 @@ impl ClickHouseMarketStore {
     }
 
     pub async fn insert_time_bars(&self, rows: &[TimeBarRow]) -> anyhow::Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let mut insert = self
-            .client
-            .insert("bars_time")
-            .context("failed to create time bar insert")?;
-        for row in rows {
-            insert
-                .write(row)
-                .await
-                .context("failed to write time bar row")?;
-        }
-        insert
-            .end()
-            .await
-            .context("failed to finalize time bar insert")?;
-        Ok(())
+        let bar_rows = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "ts": format_clickhouse_timestamp(row.ts),
+                    "trading_day": format_clickhouse_date(row.trading_day),
+                    "session_date": format_clickhouse_date(row.session_date),
+                    "symbol_contract": row.symbol_contract,
+                    "timeframe": row.timeframe,
+                    "open": row.open,
+                    "high": row.high,
+                    "low": row.low,
+                    "close": row.close,
+                    "volume": row.volume,
+                    "trade_count": row.trade_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.insert_json_each_row("bars_time", &bar_rows).await
     }
 
     pub async fn clear_time_bars(
@@ -442,12 +456,12 @@ impl ClickHouseMarketStore {
     ) -> anyhow::Result<()> {
         self.client
             .query(
-                "ALTER TABLE bars_time DELETE WHERE symbol_contract = ? AND timeframe = ? AND ts >= ? AND ts <= ?",
+                "ALTER TABLE bars_time DELETE WHERE symbol_contract = ? AND timeframe = ? AND ts >= parseDateTime64BestEffort(?) AND ts <= parseDateTime64BestEffort(?)",
             )
             .bind(symbol_contract)
             .bind(timeframe)
-            .bind(start)
-            .bind(end)
+            .bind(format_clickhouse_timestamp(start))
+            .bind(format_clickhouse_timestamp(end))
             .execute()
             .await
             .context("failed to clear time bars")?;
@@ -468,24 +482,26 @@ impl ClickHouseMarketStore {
     }
 
     pub async fn insert_non_time_bars(&self, rows: &[NonTimeBarRow]) -> anyhow::Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let mut insert = self
-            .client
-            .insert("bars_non_time")
-            .context("failed to create non-time bar insert")?;
-        for row in rows {
-            insert
-                .write(row)
-                .await
-                .context("failed to write non-time bar row")?;
-        }
-        insert
-            .end()
-            .await
-            .context("failed to finalize non-time bar insert")?;
-        Ok(())
+        let bar_rows = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "ts": format_clickhouse_timestamp(row.ts),
+                    "trading_day": format_clickhouse_date(row.trading_day),
+                    "session_date": format_clickhouse_date(row.session_date),
+                    "symbol_contract": row.symbol_contract,
+                    "bar_type": row.bar_type,
+                    "bar_size": row.bar_size,
+                    "open": row.open,
+                    "high": row.high,
+                    "low": row.low,
+                    "close": row.close,
+                    "volume": row.volume,
+                    "trade_count": row.trade_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.insert_json_each_row("bars_non_time", &bar_rows).await
     }
 
     pub async fn clear_non_time_bars(
@@ -498,13 +514,13 @@ impl ClickHouseMarketStore {
     ) -> anyhow::Result<()> {
         self.client
             .query(
-                "ALTER TABLE bars_non_time DELETE WHERE symbol_contract = ? AND bar_type = ? AND bar_size = ? AND ts >= ? AND ts <= ?",
+                "ALTER TABLE bars_non_time DELETE WHERE symbol_contract = ? AND bar_type = ? AND bar_size = ? AND ts >= parseDateTime64BestEffort(?) AND ts <= parseDateTime64BestEffort(?)",
             )
             .bind(symbol_contract)
             .bind(bar_type)
             .bind(bar_size)
-            .bind(start)
-            .bind(end)
+            .bind(format_clickhouse_timestamp(start))
+            .bind(format_clickhouse_timestamp(end))
             .execute()
             .await
             .context("failed to clear non-time bars")?;
@@ -540,14 +556,14 @@ impl ClickHouseMarketStore {
                 FROM profile_segments
                 WHERE symbol_contract = ?
                   AND profile_timezone = ?
-                  AND segment_end >= ?
-                  AND segment_start <= ?
+                  AND segment_end >= parseDateTime64BestEffort(?)
+                  AND segment_start <= parseDateTime64BestEffort(?)
                 "#,
             )
             .bind(symbol_contract)
             .bind(profile_timezone)
-            .bind(start)
-            .bind(end)
+            .bind(format_clickhouse_timestamp(start))
+            .bind(format_clickhouse_timestamp(end))
             .fetch_all::<SegmentIdRow>()
             .await
             .context("failed to load overlapping profile segments")?;
@@ -571,12 +587,12 @@ impl ClickHouseMarketStore {
 
         self.client
             .query(
-                "ALTER TABLE profile_segments DELETE WHERE symbol_contract = ? AND profile_timezone = ? AND segment_end >= ? AND segment_start <= ?",
+                "ALTER TABLE profile_segments DELETE WHERE symbol_contract = ? AND profile_timezone = ? AND segment_end >= parseDateTime64BestEffort(?) AND segment_start <= parseDateTime64BestEffort(?)",
             )
             .bind(symbol_contract)
             .bind(profile_timezone)
-            .bind(start)
-            .bind(end)
+            .bind(format_clickhouse_timestamp(start))
+            .bind(format_clickhouse_timestamp(end))
             .execute()
             .await
             .context("failed to clear profile segments")?;
@@ -599,57 +615,115 @@ impl ClickHouseMarketStore {
             return Ok(());
         }
 
-        let mut segment_insert = self
-            .client
-            .insert("profile_segments")
-            .context("failed to create profile segment insert")?;
-        let mut level_insert = self
-            .client
-            .insert("profile_levels_base")
-            .context("failed to create profile level insert")?;
+        let segments = profiles.iter().map(|profile| profile.segment.clone()).collect::<Vec<_>>();
+        let levels = profiles
+            .iter()
+            .flat_map(|profile| profile.levels.clone())
+            .collect::<Vec<_>>();
 
-        for profile in profiles {
-            segment_insert
-                .write(&profile.segment)
-                .await
-                .context("failed to write profile segment")?;
-            for level in &profile.levels {
-                level_insert
-                    .write(level)
-                    .await
-                    .context("failed to write profile level")?;
-            }
-        }
+        let segment_rows = segments
+            .iter()
+            .map(|row| {
+                json!({
+                    "segment_id": row.segment_id,
+                    "symbol_contract": row.symbol_contract,
+                    "preset": row.preset,
+                    "metric": row.metric,
+                    "profile_timezone": row.profile_timezone,
+                    "label": row.label,
+                    "segment_start": format_clickhouse_timestamp(row.segment_start),
+                    "segment_end": format_clickhouse_timestamp(row.segment_end),
+                    "base_tick_size": row.base_tick_size,
+                    "total_value": row.total_value,
+                    "max_value": row.max_value,
+                    "value_area_enabled": row.value_area_enabled,
+                    "value_area_percent": row.value_area_percent,
+                    "value_area_poc": row.value_area_poc,
+                    "value_area_low": row.value_area_low,
+                    "value_area_high": row.value_area_high,
+                    "value_area_volume": row.value_area_volume,
+                })
+            })
+            .collect::<Vec<_>>();
+        let level_rows = levels
+            .iter()
+            .map(|row| {
+                json!({
+                    "segment_id": row.segment_id,
+                    "symbol_contract": row.symbol_contract,
+                    "price_level": row.price_level,
+                    "total_volume": row.total_volume,
+                    "buy_volume": row.buy_volume,
+                    "sell_volume": row.sell_volume,
+                    "delta": row.delta,
+                })
+            })
+            .collect::<Vec<_>>();
 
-        segment_insert
-            .end()
+        self.insert_json_each_row("profile_segments", &segment_rows)
             .await
-            .context("failed to finalize profile segment insert")?;
-        level_insert
-            .end()
+            .context("failed to insert profile segments")?;
+        self.insert_json_each_row("profile_levels_base", &level_rows)
             .await
-            .context("failed to finalize profile level insert")?;
+            .context("failed to insert profile levels")?;
         Ok(())
     }
 
     pub async fn insert_large_orders(&self, rows: &[LargeOrderRow]) -> anyhow::Result<()> {
+        let order_rows = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "ts": format_clickhouse_timestamp(row.ts),
+                    "trading_day": format_clickhouse_date(row.trading_day),
+                    "session_date": format_clickhouse_date(row.session_date),
+                    "symbol_contract": row.symbol_contract,
+                    "method": row.method,
+                    "threshold": row.threshold,
+                    "trade_price": row.trade_price,
+                    "trade_size": row.trade_size,
+                    "side": row.side,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.insert_json_each_row("large_orders", &order_rows).await
+    }
+
+    async fn insert_json_each_row(&self, table: &str, rows: &[Value]) -> anyhow::Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut insert = self
-            .client
-            .insert("large_orders")
-            .context("failed to create large order insert")?;
+
+        let mut body = String::new();
         for row in rows {
-            insert
-                .write(row)
-                .await
-                .context("failed to write large order row")?;
+            body.push_str(&serde_json::to_string(row).context("failed to serialize clickhouse row")?);
+            body.push('\n');
         }
-        insert
-            .end()
+
+        let query = format!("INSERT INTO {table} FORMAT JSONEachRow");
+        let response = self
+            .http
+            .post(format!("{}/", self.base_url))
+            .query(&[
+                ("database", self.database.as_str()),
+                ("query", query.as_str()),
+                ("async_insert", "0"),
+                ("wait_for_async_insert", "0"),
+            ])
+            .body(body)
+            .send()
             .await
-            .context("failed to finalize large order insert")?;
+            .context("failed to submit clickhouse insert request")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| format!("clickhouse insert failed with status {status}"));
+            anyhow::bail!("clickhouse insert failed: {message}");
+        }
+
         Ok(())
     }
 
@@ -663,13 +737,13 @@ impl ClickHouseMarketStore {
     ) -> anyhow::Result<()> {
         self.client
             .query(
-                "ALTER TABLE large_orders DELETE WHERE symbol_contract = ? AND method = ? AND threshold = ? AND ts >= ? AND ts <= ?",
+                "ALTER TABLE large_orders DELETE WHERE symbol_contract = ? AND method = ? AND threshold = ? AND ts >= parseDateTime64BestEffort(?) AND ts <= parseDateTime64BestEffort(?)",
             )
             .bind(symbol_contract)
             .bind(method)
             .bind(threshold)
-            .bind(start)
-            .bind(end)
+            .bind(format_clickhouse_timestamp(start))
+            .bind(format_clickhouse_timestamp(end))
             .execute()
             .await
             .context("failed to clear large orders")?;
@@ -689,6 +763,14 @@ impl ClickHouseMarketStore {
             .await?;
         self.insert_large_orders(rows).await
     }
+}
+
+fn format_clickhouse_timestamp(value: DateTime<Utc>) -> String {
+    value.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+}
+
+fn format_clickhouse_date(value: chrono::NaiveDate) -> String {
+    value.format("%Y-%m-%d").to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]

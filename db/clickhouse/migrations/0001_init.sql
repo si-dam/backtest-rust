@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS ticks (
     ts DateTime64(6, 'UTC'),
     trading_day Date,
     session_date Date,
-    symbol_contract LowCardinality(String),
+    symbol_contract String,
     trade_price Float64,
     trade_size Float64,
     bid_price Nullable(Float64),
@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS bars_time (
     ts DateTime64(6, 'UTC'),
     trading_day Date,
     session_date Date,
-    symbol_contract LowCardinality(String),
-    timeframe LowCardinality(String),
+    symbol_contract String,
+    timeframe String,
     open Float64,
     high Float64,
     low Float64,
@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS bars_non_time (
     ts DateTime64(6, 'UTC'),
     trading_day Date,
     session_date Date,
-    symbol_contract LowCardinality(String),
-    bar_type LowCardinality(String),
+    symbol_contract String,
+    bar_type String,
     bar_size UInt32,
     open Float64,
     high Float64,
@@ -50,10 +50,10 @@ ORDER BY (symbol_contract, bar_type, bar_size, ts);
 
 CREATE TABLE IF NOT EXISTS profile_segments (
     segment_id UUID,
-    symbol_contract LowCardinality(String),
-    preset LowCardinality(String),
-    metric LowCardinality(String),
-    profile_timezone LowCardinality(String),
+    symbol_contract String,
+    preset String,
+    metric String,
+    profile_timezone String,
     label String,
     segment_start DateTime64(6, 'UTC'),
     segment_end DateTime64(6, 'UTC'),
@@ -73,7 +73,7 @@ ORDER BY (symbol_contract, preset, metric, profile_timezone, segment_start, segm
 
 CREATE TABLE IF NOT EXISTS profile_levels_base (
     segment_id UUID,
-    symbol_contract LowCardinality(String),
+    symbol_contract String,
     price_level Float64,
     total_volume Float64,
     buy_volume Float64,
@@ -87,12 +87,12 @@ CREATE TABLE IF NOT EXISTS large_orders (
     ts DateTime64(6, 'UTC'),
     trading_day Date,
     session_date Date,
-    symbol_contract LowCardinality(String),
-    method LowCardinality(String),
+    symbol_contract String,
+    method String,
     threshold Float64,
     trade_price Float64,
     trade_size Float64,
-    side LowCardinality(String)
+    side String
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(trading_day)
