@@ -2,11 +2,16 @@ mod bars;
 mod ingest;
 mod profiles;
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::Read,
+    path::Path,
+};
 
 use anyhow::Context;
 use app_core::error::ApiError;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 use clickhouse::{error::Error as ClickHouseError, Client, Row};
 use profiles::{bucket_price, build_preset_profiles, build_value_area, classify_side};
@@ -28,7 +33,9 @@ pub use bars::{
     timeframe_to_seconds,
 };
 pub use ingest::{
-    parse_market_data_file, summarize_parsed_data, ParsedFileSummary, ParsedMarketData,
+    detect_market_data_schema, parse_market_data_file, stream_market_data_file_in_batches,
+    summarize_parsed_data, MarketDataSchemaKind, ParsedFileSummary, ParsedMarketData,
+    ParsedMarketDataBatch,
 };
 
 #[derive(Clone)]
@@ -78,25 +85,90 @@ impl ClickHouseMarketStore {
         symbol: &str,
         query: &TicksQuery,
     ) -> Result<Vec<TickRecord>, ApiError> {
-        self.client
+        let query_text = format!(
+            r#"
+            SELECT ts, session_date, symbol_contract, trade_price, trade_size, bid_price, ask_price
+            FROM ticks
+            WHERE symbol_contract = '{symbol}'
+              AND ts >= parseDateTime64BestEffort('{start}')
+              AND ts <= parseDateTime64BestEffort('{end}')
+            ORDER BY ts
+            LIMIT {limit}
+            FORMAT JSONEachRow
+            "#,
+            symbol = escape_clickhouse_string(symbol),
+            start = format_clickhouse_timestamp(query.start),
+            end = format_clickhouse_timestamp(query.end),
+            limit = query.limit,
+        );
+        let response = self
+            .http
+            .get(format!("{}/", self.base_url))
+            .query(&[
+                ("database", self.database.as_str()),
+                ("query", query_text.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to query clickhouse ticks: {error}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to read clickhouse ticks response: {error}")))?;
+        if !status.is_success() {
+            return Err(ApiError::internal(format!("clickhouse query failed: {body}")));
+        }
+
+        parse_tick_rows_json_each_row(&body)
+            .map_err(|error| ApiError::internal(format!("failed to decode clickhouse ticks: {error:#}")))
+    }
+
+    pub async fn load_tick_bounds_for_source(
+        &self,
+        source_file: &str,
+    ) -> anyhow::Result<Option<(DateTime<Utc>, DateTime<Utc>, String)>> {
+        let first = self
+            .client
             .query(
                 r#"
-                SELECT ts, session_date, symbol_contract, trade_price, trade_size, bid_price, ask_price
+                SELECT
+                    ts,
+                    symbol_contract
                 FROM ticks
-                WHERE symbol_contract = ?
-                  AND ts >= parseDateTime64BestEffort(?)
-                  AND ts <= parseDateTime64BestEffort(?)
-                ORDER BY ts
-                LIMIT ?
+                WHERE source_file = ?
+                ORDER BY ts ASC
+                LIMIT 1
                 "#,
             )
-            .bind(symbol)
-            .bind(format_clickhouse_timestamp(query.start))
-            .bind(format_clickhouse_timestamp(query.end))
-            .bind(query.limit as u64)
-            .fetch_all::<TickRecord>()
+            .bind(source_file)
+            .fetch_optional::<SourceTickRow>()
             .await
-            .map_err(map_clickhouse_err)
+            .context("failed to load first tick by source file")?;
+        let Some(first) = first else {
+            return Ok(None);
+        };
+
+        let last = self
+            .client
+            .query(
+                r#"
+                SELECT
+                    ts,
+                    symbol_contract
+                FROM ticks
+                WHERE source_file = ?
+                ORDER BY ts DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(source_file)
+            .fetch_one::<SourceTickRow>()
+            .await
+            .context("failed to load last tick by source file")?;
+
+        Ok(Some((first.ts, last.ts, first.symbol_contract)))
     }
 
     pub async fn load_bars(
@@ -773,6 +845,31 @@ fn format_clickhouse_date(value: chrono::NaiveDate) -> String {
     value.format("%Y-%m-%d").to_string()
 }
 
+fn escape_clickhouse_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn parse_tick_rows_json_each_row(body: &str) -> anyhow::Result<Vec<TickRecord>> {
+    let mut rows = Vec::new();
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let raw: ClickHouseTickRow = serde_json::from_str(line)
+            .with_context(|| "failed to parse clickhouse JSONEachRow tick")?;
+        rows.push(raw.try_into()?);
+    }
+    Ok(rows)
+}
+
+fn parse_clickhouse_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
+    let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+        .with_context(|| format!("invalid clickhouse timestamp: {value}"))?;
+    Ok(DateTime::from_naive_utc_and_offset(parsed, Utc))
+}
+
+fn parse_clickhouse_date(value: &str) -> anyhow::Result<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .with_context(|| format!("invalid clickhouse date: {value}"))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct TicksQuery {
     pub start: DateTime<Utc>,
@@ -984,6 +1081,33 @@ pub struct TickRecord {
     pub trade_size: f64,
     pub bid_price: Option<f64>,
     pub ask_price: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ClickHouseTickRow {
+    ts: String,
+    session_date: String,
+    symbol_contract: String,
+    trade_price: f64,
+    trade_size: f64,
+    bid_price: Option<f64>,
+    ask_price: Option<f64>,
+}
+
+impl TryFrom<ClickHouseTickRow> for TickRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ClickHouseTickRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            ts: parse_clickhouse_timestamp(&value.ts)?,
+            session_date: parse_clickhouse_date(&value.session_date)?,
+            symbol_contract: value.symbol_contract,
+            trade_price: value.trade_price,
+            trade_size: value.trade_size,
+            bid_price: value.bid_price,
+            ask_price: value.ask_price,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1413,6 +1537,12 @@ struct ClickHousePingRow {
     value: u8,
 }
 
+#[derive(Clone, Debug, Deserialize, Row)]
+struct SourceTickRow {
+    ts: DateTime<Utc>,
+    symbol_contract: String,
+}
+
 fn default_metric() -> String {
     "volume".to_string()
 }
@@ -1461,6 +1591,25 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+pub fn sha256_hex_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open {} for hashing", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read {} while hashing", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 pub fn build_profiles_for_ticks(

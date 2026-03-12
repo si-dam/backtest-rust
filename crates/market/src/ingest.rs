@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
-    fs,
+    fs::File,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
@@ -18,6 +19,18 @@ pub enum ParsedMarketData {
     Ohlc1m(Vec<TimeBarRow>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarketDataSchemaKind {
+    Ticks,
+    Ohlc1m,
+}
+
+#[derive(Clone, Debug)]
+pub enum ParsedMarketDataBatch {
+    Ticks(Vec<CanonicalTick>),
+    Ohlc1m(Vec<TimeBarRow>),
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ParsedFileSummary {
     pub source_path: PathBuf,
@@ -31,86 +44,170 @@ pub fn parse_market_data_file(
     dataset_timezone: Tz,
     fallback_symbol: Option<&str>,
 ) -> anyhow::Result<ParsedMarketData> {
-    let bytes = fs::read(path).with_context(|| format!("unable to open {}", path.display()))?;
-    let mut reader = csv::ReaderBuilder::new()
-        .flexible(true)
-        .trim(csv::Trim::All)
-        .delimiter(detect_delimiter(&bytes))
-        .from_reader(bytes.as_slice());
-
-    let headers = reader.headers().context("missing headers")?.clone();
-    let lookup = HeaderLookup::from_headers(&headers);
-    let mut records = reader.records();
-    let first_record = records
-        .next()
-        .transpose()
-        .context("failed to read row 2")?;
-
-    if TickColumns::can_parse(&lookup) {
-        let columns = TickColumns::from_lookup(&lookup)?;
-        let mut ticks = Vec::new();
-        if let Some(record) = first_record.as_ref() {
-            ticks.push(
-                parse_tick_record(record, &columns, dataset_timezone, fallback_symbol)
-                    .with_context(|| "failed to parse tick row 2")?,
-            );
-        }
-        for (row_index, row) in records.enumerate() {
-            let line_number = row_index + 3;
-            let record = row.with_context(|| format!("failed to read row {line_number}"))?;
-            ticks.push(
-                parse_tick_record(&record, &columns, dataset_timezone, fallback_symbol)
-                    .with_context(|| format!("failed to parse tick row {line_number}"))?,
-            );
-        }
-        return Ok(ParsedMarketData::Ticks(ticks));
-    }
-
-    if SierraTickBarColumns::can_parse(&lookup) {
-        let columns = SierraTickBarColumns::from_lookup(&lookup)?;
-        let should_parse_as_ticks = first_record
-            .as_ref()
-            .map(|record| sierra_tick_bar_is_subminute(record, &columns, dataset_timezone))
-            .transpose()?
-            .unwrap_or(false);
-
-        if should_parse_as_ticks {
-            let mut ticks = Vec::new();
-            if let Some(record) = first_record.as_ref() {
-                ticks.push(
-                    parse_sierra_tick_bar_record(record, &columns, dataset_timezone, fallback_symbol)
-                        .with_context(|| "failed to parse Sierra tick row 2")?,
-                );
+    let mut ticks = Vec::new();
+    let mut bars = Vec::new();
+    let summary =
+        stream_market_data_file_in_batches(path, dataset_timezone, fallback_symbol, 50_000, |batch| {
+            match batch {
+                ParsedMarketDataBatch::Ticks(rows) => ticks.extend(rows),
+                ParsedMarketDataBatch::Ohlc1m(rows) => bars.extend(rows),
             }
-            for (row_index, row) in records.enumerate() {
+            Ok(())
+        })?;
+
+    match summary.schema_kind.as_str() {
+        "ticks" => Ok(ParsedMarketData::Ticks(ticks)),
+        "ohlc_1m" => Ok(ParsedMarketData::Ohlc1m(bars)),
+        other => anyhow::bail!("unsupported parsed schema kind: {other}"),
+    }
+}
+
+pub fn detect_market_data_schema(path: &Path, dataset_timezone: Tz) -> anyhow::Result<MarketDataSchemaKind> {
+    let (_reader, parser, _first_record) = detect_market_parser(path, dataset_timezone)?;
+    Ok(match parser {
+        MarketParser::Tick(_) | MarketParser::SierraTick(_) => MarketDataSchemaKind::Ticks,
+        MarketParser::Ohlc(_) => MarketDataSchemaKind::Ohlc1m,
+    })
+}
+
+pub fn stream_market_data_file_in_batches<F>(
+    path: &Path,
+    dataset_timezone: Tz,
+    fallback_symbol: Option<&str>,
+    batch_size: usize,
+    mut on_batch: F,
+) -> anyhow::Result<ParsedFileSummary>
+where
+    F: FnMut(ParsedMarketDataBatch) -> anyhow::Result<()>,
+{
+    let batch_size = batch_size.max(1);
+    let (mut reader, parser, first_record) = detect_market_parser(path, dataset_timezone)?;
+
+    match parser {
+        MarketParser::Tick(columns) => {
+            let mut ticks = Vec::with_capacity(batch_size);
+            let mut row_count = 0usize;
+            let mut symbol_contract = None;
+
+            if let Some(record) = first_record.as_ref() {
+                let tick = parse_tick_record(record, &columns, dataset_timezone, fallback_symbol)
+                    .with_context(|| "failed to parse tick row 2")?;
+                symbol_contract = Some(tick.symbol_contract.clone());
+                ticks.push(tick);
+                row_count += 1;
+            }
+
+            for (row_index, row) in reader.records().enumerate() {
                 let line_number = row_index + 3;
                 let record = row.with_context(|| format!("failed to read row {line_number}"))?;
-                ticks.push(
-                    parse_sierra_tick_bar_record(&record, &columns, dataset_timezone, fallback_symbol)
-                        .with_context(|| format!("failed to parse Sierra tick row {line_number}"))?,
-                );
+                let tick = parse_tick_record(&record, &columns, dataset_timezone, fallback_symbol)
+                    .with_context(|| format!("failed to parse tick row {line_number}"))?;
+                if symbol_contract.is_none() {
+                    symbol_contract = Some(tick.symbol_contract.clone());
+                }
+                ticks.push(tick);
+                row_count += 1;
+                if ticks.len() >= batch_size {
+                    on_batch(ParsedMarketDataBatch::Ticks(replace_vec(&mut ticks, batch_size)))?;
+                }
             }
-            return Ok(ParsedMarketData::Ticks(ticks));
+
+            if !ticks.is_empty() {
+                on_batch(ParsedMarketDataBatch::Ticks(ticks))?;
+            }
+
+            Ok(ParsedFileSummary {
+                source_path: path.to_path_buf(),
+                schema_kind: "ticks".to_string(),
+                symbol_contract,
+                row_count,
+            })
+        }
+        MarketParser::SierraTick(columns) => {
+            let mut ticks = Vec::with_capacity(batch_size);
+            let mut row_count = 0usize;
+            let mut symbol_contract = None;
+
+            if let Some(record) = first_record.as_ref() {
+                let tick =
+                    parse_sierra_tick_bar_record(record, &columns, dataset_timezone, fallback_symbol)
+                        .with_context(|| "failed to parse Sierra tick row 2")?;
+                symbol_contract = Some(tick.symbol_contract.clone());
+                ticks.push(tick);
+                row_count += 1;
+            }
+
+            for (row_index, row) in reader.records().enumerate() {
+                let line_number = row_index + 3;
+                let record = row.with_context(|| format!("failed to read row {line_number}"))?;
+                let tick = parse_sierra_tick_bar_record(
+                    &record,
+                    &columns,
+                    dataset_timezone,
+                    fallback_symbol,
+                )
+                .with_context(|| format!("failed to parse Sierra tick row {line_number}"))?;
+                if symbol_contract.is_none() {
+                    symbol_contract = Some(tick.symbol_contract.clone());
+                }
+                ticks.push(tick);
+                row_count += 1;
+                if ticks.len() >= batch_size {
+                    on_batch(ParsedMarketDataBatch::Ticks(replace_vec(&mut ticks, batch_size)))?;
+                }
+            }
+
+            if !ticks.is_empty() {
+                on_batch(ParsedMarketDataBatch::Ticks(ticks))?;
+            }
+
+            Ok(ParsedFileSummary {
+                source_path: path.to_path_buf(),
+                schema_kind: "ticks".to_string(),
+                symbol_contract,
+                row_count,
+            })
+        }
+        MarketParser::Ohlc(columns) => {
+            let mut bars = Vec::with_capacity(batch_size);
+            let mut row_count = 0usize;
+            let mut symbol_contract = None;
+
+            if let Some(record) = first_record.as_ref() {
+                let bar = parse_ohlc_record(record, &columns, dataset_timezone, fallback_symbol)
+                    .with_context(|| "failed to parse OHLC row 2")?;
+                symbol_contract = Some(bar.symbol_contract.clone());
+                bars.push(bar);
+                row_count += 1;
+            }
+
+            for (row_index, row) in reader.records().enumerate() {
+                let line_number = row_index + 3;
+                let record = row.with_context(|| format!("failed to read row {line_number}"))?;
+                let bar = parse_ohlc_record(&record, &columns, dataset_timezone, fallback_symbol)
+                    .with_context(|| format!("failed to parse OHLC row {line_number}"))?;
+                if symbol_contract.is_none() {
+                    symbol_contract = Some(bar.symbol_contract.clone());
+                }
+                bars.push(bar);
+                row_count += 1;
+                if bars.len() >= batch_size {
+                    on_batch(ParsedMarketDataBatch::Ohlc1m(replace_vec(&mut bars, batch_size)))?;
+                }
+            }
+
+            if !bars.is_empty() {
+                on_batch(ParsedMarketDataBatch::Ohlc1m(bars))?;
+            }
+
+            Ok(ParsedFileSummary {
+                source_path: path.to_path_buf(),
+                schema_kind: "ohlc_1m".to_string(),
+                symbol_contract,
+                row_count,
+            })
         }
     }
-
-    let columns = OhlcColumns::from_lookup(&lookup)?;
-    let mut bars = Vec::new();
-    if let Some(record) = first_record.as_ref() {
-        bars.push(
-            parse_ohlc_record(record, &columns, dataset_timezone, fallback_symbol)
-                .with_context(|| "failed to parse OHLC row 2")?,
-        );
-    }
-    for (row_index, row) in records.enumerate() {
-        let line_number = row_index + 3;
-        let record = row.with_context(|| format!("failed to read row {line_number}"))?;
-        bars.push(
-            parse_ohlc_record(&record, &columns, dataset_timezone, fallback_symbol)
-                .with_context(|| format!("failed to parse OHLC row {line_number}"))?,
-        );
-    }
-    Ok(ParsedMarketData::Ohlc1m(bars))
 }
 
 pub fn summarize_parsed_data(path: &Path, parsed: &ParsedMarketData) -> ParsedFileSummary {
@@ -160,6 +257,77 @@ struct TickColumns {
     bid_price: usize,
     ask_price: usize,
     symbol_contract: Option<usize>,
+}
+
+enum MarketParser {
+    Tick(TickColumns),
+    SierraTick(SierraTickBarColumns),
+    Ohlc(OhlcColumns),
+}
+
+fn detect_market_parser(
+    path: &Path,
+    dataset_timezone: Tz,
+) -> anyhow::Result<(csv::Reader<BufReader<File>>, MarketParser, Option<StringRecord>)> {
+    let mut reader = open_market_reader(path)?;
+    let headers = reader.headers().context("missing headers")?.clone();
+    let lookup = HeaderLookup::from_headers(&headers);
+    let first_record = reader
+        .records()
+        .next()
+        .transpose()
+        .context("failed to read row 2")?;
+
+    if TickColumns::can_parse(&lookup) {
+        return Ok((
+            reader,
+            MarketParser::Tick(TickColumns::from_lookup(&lookup)?),
+            first_record,
+        ));
+    }
+
+    if SierraTickBarColumns::can_parse(&lookup) {
+        let columns = SierraTickBarColumns::from_lookup(&lookup)?;
+        let should_parse_as_ticks = first_record
+            .as_ref()
+            .map(|record| sierra_tick_bar_is_subminute(record, &columns, dataset_timezone))
+            .transpose()?
+            .unwrap_or(false);
+
+        if should_parse_as_ticks {
+            return Ok((reader, MarketParser::SierraTick(columns), first_record));
+        }
+    }
+
+    Ok((
+        reader,
+        MarketParser::Ohlc(OhlcColumns::from_lookup(&lookup)?),
+        first_record,
+    ))
+}
+
+fn open_market_reader(path: &Path) -> anyhow::Result<csv::Reader<BufReader<File>>> {
+    let delimiter = detect_delimiter_from_path(path)?;
+    let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
+    Ok(csv::ReaderBuilder::new()
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .delimiter(delimiter)
+        .from_reader(BufReader::new(file)))
+}
+
+fn detect_delimiter_from_path(path: &Path) -> anyhow::Result<u8> {
+    let file = File::open(path).with_context(|| format!("unable to open {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = Vec::new();
+    reader
+        .read_until(b'\n', &mut first_line)
+        .with_context(|| format!("failed to read first line from {}", path.display()))?;
+    Ok(detect_delimiter(&first_line))
+}
+
+fn replace_vec<T>(rows: &mut Vec<T>, next_capacity: usize) -> Vec<T> {
+    std::mem::replace(rows, Vec::with_capacity(next_capacity))
 }
 
 impl TickColumns {

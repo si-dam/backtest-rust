@@ -14,7 +14,10 @@ set -a
 source "$ENV_FILE"
 set +a
 
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-$ROOT/artifacts}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-./artifacts}"
+if [[ "$ARTIFACT_ROOT" != /* ]]; then
+  ARTIFACT_ROOT="$ROOT/${ARTIFACT_ROOT#./}"
+fi
 LOG_DIR="$ARTIFACT_ROOT/logs"
 mkdir -p "$LOG_DIR"
 

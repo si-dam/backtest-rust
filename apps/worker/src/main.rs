@@ -1,6 +1,6 @@
 use std::{fs::File, path::PathBuf, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use app_core::{
     config::Settings,
     runtime::{prepare_runtime_directories, shutdown_signal},
@@ -20,17 +20,24 @@ use chrono::{DateTime, Utc};
 use jobs::{CreateJobInput, JobProgressUpdate, JobType, PgJobStore};
 use market::{
     build_large_orders_from_ticks, build_non_time_bars_from_ticks, build_profiles_for_ticks,
-    build_time_bars_from_ticks, derive_symbol_root, detect_tick_size, parse_market_data_file,
-    sha256_hex, summarize_parsed_data, timeframe_to_seconds, BarRecord, BarsQuery, CanonicalTick,
-    CanonicalTickRow, ClickHouseMarketStore, LargeOrderRow, ParsedMarketData,
-    PresetProfileQuery, TicksQuery,
+    build_time_bars_from_ticks, detect_market_data_schema, derive_symbol_root, detect_tick_size,
+    parse_market_data_file, sha256_hex_file, stream_market_data_file_in_batches,
+    summarize_parsed_data, timeframe_to_seconds, BarRecord, BarsQuery, CanonicalTick,
+    CanonicalTickRow, ClickHouseMarketStore, LargeOrderRow, MarketDataSchemaKind,
+    ParsedMarketData, ParsedMarketDataBatch, PresetProfileQuery, TicksQuery,
 };
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
-use tokio::fs;
+use tokio::{
+    fs,
+    sync::{mpsc, oneshot},
+    task,
+};
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
+
+const INGEST_BATCH_SIZE: usize = 25_000;
 
 #[derive(Clone, Debug)]
 struct OrbRunSegment {
@@ -211,10 +218,24 @@ async fn handle_ingestion(
         .get("rebuild")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let bytes = fs::read(file_path)
-        .await
-        .map_err(|error| format!("failed to read file: {error}"))?;
-    let file_hash = sha256_hex(&bytes);
+    let file_path_buf = PathBuf::from(file_path);
+    update_stage(
+        jobs,
+        job_id,
+        worker_id,
+        "hashing_source",
+        json!({ "file_path": file_path }),
+    )
+    .await?;
+    let hashing_heartbeat = start_stage_heartbeat(jobs.clone(), job_id, worker_id, "hashing_source");
+    let file_hash = task::spawn_blocking({
+        let file_path = file_path_buf.clone();
+        move || sha256_hex_file(&file_path)
+    })
+    .await
+    .map_err(|error| format!("failed to join hashing task: {error}"))?
+    .map_err(|error| format!("failed to hash file: {error:#}"))?;
+    let _ = hashing_heartbeat.send(());
     if let Some(existing) = jobs
         .get_ingested_file(file_path)
         .await
@@ -243,149 +264,137 @@ async fn handle_ingestion(
         json!({ "hash": file_hash }),
     )
     .await?;
-    let parsed = parse_market_data_file(
-        std::path::Path::new(file_path),
-        settings.dataset_timezone,
-        symbol_contract,
-    )
-    .map_err(|error| format!("failed to parse market data file: {error}"))?;
-    let summary = summarize_parsed_data(std::path::Path::new(file_path), &parsed);
+    let schema_heartbeat = start_stage_heartbeat(jobs.clone(), job_id, worker_id, "parsing_source");
+    let schema = task::spawn_blocking({
+        let file_path = file_path_buf.clone();
+        let dataset_timezone = settings.dataset_timezone;
+        move || detect_market_data_schema(&file_path, dataset_timezone)
+    })
+    .await
+    .map_err(|error| format!("failed to join schema detection task: {error}"))?
+    .map_err(|error| format!("failed to detect market data schema: {error:#}"))?;
+    let _ = schema_heartbeat.send(());
+
+    let summary = match schema {
+        MarketDataSchemaKind::Ticks => {
+            update_stage(
+                jobs,
+                job_id,
+                worker_id,
+                "persisting_ticks",
+                json!({ "batch_size": INGEST_BATCH_SIZE, "rebuild": rebuild }),
+            )
+            .await?;
+            ingest_ticks_streaming(
+                settings,
+                jobs,
+                job_id,
+                worker_id,
+                market,
+                file_path,
+                &file_path_buf,
+                symbol_contract,
+                rebuild,
+            )
+            .await?
+        }
+        MarketDataSchemaKind::Ohlc1m => {
+            let parsed = parse_market_data_file(
+                std::path::Path::new(file_path),
+                settings.dataset_timezone,
+                symbol_contract,
+            )
+            .map_err(|error| format!("failed to parse market data file: {error}"))?;
+            let summary = summarize_parsed_data(std::path::Path::new(file_path), &parsed);
+
+            if let ParsedMarketData::Ohlc1m(bars) = parsed {
+                update_stage(
+                    jobs,
+                    job_id,
+                    worker_id,
+                    "persisting_bars",
+                    json!({ "rows": bars.len(), "timeframe": "1m" }),
+                )
+                .await?;
+                if let (Some(first), Some(last), Some(symbol)) = (
+                    bars.first(),
+                    bars.last(),
+                    summary.symbol_contract.as_deref(),
+                ) {
+                    market
+                        .replace_time_bars(symbol, "1m", first.ts, last.ts, &bars)
+                        .await
+                        .map_err(|error| format!("failed to replace 1m bars: {error}"))?;
+                } else {
+                    market
+                        .insert_time_bars(&bars)
+                        .await
+                        .map_err(|error| format!("failed to insert 1m bars: {error}"))?;
+                }
+            }
+
+            summary
+        }
+    };
+
     let tick_size = summary
         .symbol_contract
         .as_deref()
         .map(detect_tick_size)
         .unwrap_or(0.25);
 
-    match parsed {
-        ParsedMarketData::Ticks(ticks) => {
-            update_stage(
-                jobs,
-                job_id,
-                worker_id,
-                "persisting_ticks",
-                json!({ "rows": ticks.len(), "rebuild": rebuild }),
-            )
-            .await?;
-            let source_name = file_path.to_string();
-            let canonical_rows = ticks
-                .iter()
-                .cloned()
-                .map(|tick| {
-                    tick.with_dataset_timezone(settings.dataset_timezone)
-                        .with_source_file(source_name.clone())
-                })
-                .map(CanonicalTickRow::from)
-                .collect::<Vec<_>>();
-            if rebuild {
-                market
-                    .delete_ticks_by_source(&source_name)
-                    .await
-                    .map_err(|error| format!("failed to clear prior ticks for source: {error}"))?;
-            }
-            market
-                .insert_ticks(&canonical_rows)
-                .await
-                .map_err(|error| format!("failed to insert ticks: {error}"))?;
-
-            let first = ticks
-                .first()
-                .ok_or_else(|| "tick dataset was empty".to_string())?;
-            let last = ticks
-                .last()
-                .ok_or_else(|| "tick dataset was empty".to_string())?;
-            let symbol = summary
-                .symbol_contract
-                .clone()
-                .ok_or_else(|| "missing symbol_contract".to_string())?;
-
-            jobs.upsert_symbol(&symbol, &derive_symbol_root(&symbol), None, Some(tick_size))
-                .await
-                .map_err(|error| format!("failed to upsert symbol: {error}"))?;
-            jobs.record_ingested_file(
-                file_path,
-                &file_hash,
-                &summary.schema_kind,
-                Some(&symbol),
-                summary.row_count as i64,
-            )
+    if let Some(symbol) = summary.symbol_contract.as_deref() {
+        jobs.upsert_symbol(symbol, &derive_symbol_root(symbol), None, Some(tick_size))
             .await
-            .map_err(|error| format!("failed to record ingested file: {error}"))?;
+            .map_err(|error| format!("failed to upsert symbol: {error}"))?;
+        jobs.record_ingested_file(
+            file_path,
+            &file_hash,
+            &summary.schema_kind,
+            Some(symbol),
+            summary.row_count as i64,
+        )
+        .await
+        .map_err(|error| format!("failed to record ingested file: {error}"))?;
+    }
 
-            update_stage(
-                jobs,
-                job_id,
-                worker_id,
-                "queueing_derivatives",
-                json!({ "symbol_contract": symbol, "start": first.ts, "end": last.ts }),
-            )
-            .await?;
-            jobs.create_job(CreateJobInput {
-                job_type: JobType::BuildBars,
-                payload_json: json!({
-                    "symbol_contract": symbol,
-                    "start": first.ts,
-                    "end": last.ts,
-                    "tick_size": tick_size,
-                    "rebuild": true,
-                }),
-                max_attempts: 3,
-            })
-            .await
-            .map_err(|error| format!("failed to enqueue build_bars job: {error}"))?;
-            jobs.create_job(CreateJobInput {
-                job_type: JobType::BuildProfiles,
-                payload_json: json!({
-                    "symbol_contract": summary.symbol_contract,
-                    "start": first.ts,
-                    "end": last.ts,
-                    "tick_size": tick_size,
-                    "profile_timezone": settings.dataset_timezone.name(),
-                    "rebuild": true,
-                }),
-                max_attempts: 3,
-            })
-            .await
-            .map_err(|error| format!("failed to enqueue build_profiles job: {error}"))?;
-        }
-        ParsedMarketData::Ohlc1m(bars) => {
-            update_stage(
-                jobs,
-                job_id,
-                worker_id,
-                "persisting_bars",
-                json!({ "rows": bars.len(), "timeframe": "1m" }),
-            )
-            .await?;
-            if let (Some(first), Some(last), Some(symbol)) = (
-                bars.first(),
-                bars.last(),
-                summary.symbol_contract.as_deref(),
-            ) {
-                market
-                    .replace_time_bars(symbol, "1m", first.ts, last.ts, &bars)
-                    .await
-                    .map_err(|error| format!("failed to replace 1m bars: {error}"))?;
-            } else {
-                market
-                    .insert_time_bars(&bars)
-                    .await
-                    .map_err(|error| format!("failed to insert 1m bars: {error}"))?;
-            }
-            if let Some(symbol) = summary.symbol_contract.as_deref() {
-                jobs.upsert_symbol(symbol, &derive_symbol_root(symbol), None, Some(tick_size))
-                    .await
-                    .map_err(|error| format!("failed to upsert symbol: {error}"))?;
-                jobs.record_ingested_file(
-                    file_path,
-                    &file_hash,
-                    &summary.schema_kind,
-                    Some(symbol),
-                    summary.row_count as i64,
-                )
-                .await
-                .map_err(|error| format!("failed to record ingested file: {error}"))?;
-            }
-        }
+    if summary.schema_kind == "ticks" {
+        let (first, last, symbol) = tick_bounds_from_source(market, file_path, &summary).await?;
+        update_stage(
+            jobs,
+            job_id,
+            worker_id,
+            "queueing_derivatives",
+            json!({ "symbol_contract": symbol, "start": first, "end": last }),
+        )
+        .await?;
+        jobs.create_job(CreateJobInput {
+            job_type: JobType::BuildBars,
+            payload_json: json!({
+                "symbol_contract": symbol,
+                "start": first,
+                "end": last,
+                "tick_size": tick_size,
+                "rebuild": true,
+            }),
+            max_attempts: 3,
+        })
+        .await
+        .map_err(|error| format!("failed to enqueue build_bars job: {error}"))?;
+        jobs.create_job(CreateJobInput {
+            job_type: JobType::BuildProfiles,
+            payload_json: json!({
+                "symbol_contract": summary.symbol_contract,
+                "start": first,
+                "end": last,
+                "tick_size": tick_size,
+                "profile_timezone": settings.dataset_timezone.name(),
+                "rebuild": true,
+            }),
+            max_attempts: 3,
+        })
+        .await
+        .map_err(|error| format!("failed to enqueue build_profiles job: {error}"))?;
     }
 
     Ok(json!({
@@ -393,6 +402,137 @@ async fn handle_ingestion(
         "summary": summary,
         "hash": file_hash,
     }))
+}
+
+async fn ingest_ticks_streaming(
+    settings: &Settings,
+    jobs: &PgJobStore,
+    job_id: Uuid,
+    worker_id: &str,
+    market: &ClickHouseMarketStore,
+    file_path: &str,
+    file_path_buf: &PathBuf,
+    symbol_contract: Option<&str>,
+    rebuild: bool,
+) -> std::result::Result<market::ParsedFileSummary, String> {
+    let source_name = file_path.to_string();
+    if rebuild {
+        market
+            .delete_ticks_by_source(&source_name)
+            .await
+            .map_err(|error| format!("failed to clear prior ticks for source: {error}"))?;
+    }
+
+    let (tx, mut rx) = mpsc::channel::<ParsedMarketDataBatch>(4);
+    let dataset_timezone = settings.dataset_timezone;
+    let fallback_symbol = symbol_contract.map(str::to_string);
+    let parse_path = file_path_buf.clone();
+    let parser = task::spawn_blocking(move || {
+        stream_market_data_file_in_batches(
+            &parse_path,
+            dataset_timezone,
+            fallback_symbol.as_deref(),
+            INGEST_BATCH_SIZE,
+            |batch| {
+                tx.blocking_send(batch)
+                    .map_err(|_| anyhow!("ingest batch receiver dropped"))?;
+                Ok(())
+            },
+        )
+    });
+
+    let mut inserted_any = false;
+    let mut inserted_rows = 0usize;
+    while let Some(batch) = rx.recv().await {
+        let ParsedMarketDataBatch::Ticks(ticks) = batch else {
+            return Err("streaming ingest produced a non-tick batch".to_string());
+        };
+
+        if ticks.is_empty() {
+            continue;
+        }
+
+        let canonical_rows = ticks
+            .into_iter()
+            .map(|tick| {
+                tick.with_dataset_timezone(settings.dataset_timezone)
+                    .with_source_file(source_name.clone())
+            })
+            .map(CanonicalTickRow::from)
+            .collect::<Vec<_>>();
+        market
+            .insert_ticks(&canonical_rows)
+            .await
+            .map_err(|error| format!("failed to insert tick batch: {error}"))?;
+        inserted_any = true;
+        inserted_rows += canonical_rows.len();
+        update_stage(
+            jobs,
+            job_id,
+            worker_id,
+            "persisting_ticks",
+            json!({
+                "rows": inserted_rows,
+                "batch_rows": canonical_rows.len(),
+                "batch_size": INGEST_BATCH_SIZE,
+                "rebuild": rebuild,
+            }),
+        )
+        .await?;
+    }
+
+    let summary = parser
+        .await
+        .map_err(|error| format!("failed to join streaming parser task: {error}"))?
+        .map_err(|error| format!("failed to parse market data file: {error:#}"));
+
+    match summary {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            if inserted_any {
+                let _ = market.delete_ticks_by_source(&source_name).await;
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn tick_bounds_from_source(
+    market: &ClickHouseMarketStore,
+    file_path: &str,
+    summary: &market::ParsedFileSummary,
+) -> std::result::Result<(DateTime<Utc>, DateTime<Utc>, String), String> {
+    let (first, last, loaded_symbol) = market
+        .load_tick_bounds_for_source(file_path)
+        .await
+        .map_err(|error| format!("failed to load ingested tick bounds by source: {error}"))?
+        .ok_or_else(|| "tick dataset was empty".to_string())?;
+    let symbol = summary
+        .symbol_contract
+        .clone()
+        .unwrap_or(loaded_symbol);
+    Ok((first, last, symbol))
+}
+
+fn start_stage_heartbeat(
+    jobs: PgJobStore,
+    job_id: Uuid,
+    worker_id: &str,
+    stage: &'static str,
+) -> oneshot::Sender<()> {
+    let worker_id = worker_id.to_string();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = sleep(Duration::from_secs(10)) => {
+                    let _ = jobs.heartbeat(job_id, &worker_id, 30, stage).await;
+                }
+                _ = &mut shutdown_rx => break,
+            }
+        }
+    });
+    shutdown_tx
 }
 
 async fn handle_build_bars(
