@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ChartCard from "../components/ChartCard";
 import { getBars, getLargeOrders } from "../lib/api";
@@ -20,8 +20,16 @@ function buildBarsParams(lookbackHours: number, barType: string, timeframe: stri
   return params;
 }
 
-interface MarketOverviewProps {
+const BAR_SIZE_OPTIONS = {
+  tick: ["1500", "3000", "5000"],
+  volume: ["500", "1000", "5000"],
+  range: ["20", "40", "80"],
+} as const;
+
+interface ChartWorkspaceProps {
   selectedSymbol: string;
+  onSelectedSymbolChange: (nextSymbol: string) => void;
+  symbolOptions: string[];
 }
 
 function buildLargeOrdersParams(lookbackHours: number, fixedThreshold: string) {
@@ -35,12 +43,33 @@ function buildLargeOrdersParams(lookbackHours: number, fixedThreshold: string) {
   });
 }
 
-export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) {
+export default function ChartWorkspace({
+  selectedSymbol,
+  onSelectedSymbolChange,
+  symbolOptions,
+}: ChartWorkspaceProps) {
   const [lookbackHours, setLookbackHours] = useState("24");
   const [barType, setBarType] = useState("time");
   const [timeframe, setTimeframe] = useState("1m");
   const [barSize, setBarSize] = useState("1500");
   const [largeOrderThreshold, setLargeOrderThreshold] = useState("25");
+  const [showVolume, setShowVolume] = useState(true);
+  const [showLargeOrders, setShowLargeOrders] = useState(false);
+
+  const availableBarSizes = useMemo(
+    () => (barType === "time" ? [] : [...BAR_SIZE_OPTIONS[barType as keyof typeof BAR_SIZE_OPTIONS]]),
+    [barType],
+  );
+
+  useEffect(() => {
+    if (barType === "time") {
+      return;
+    }
+
+    if (!availableBarSizes.some((size) => size === barSize)) {
+      setBarSize(availableBarSizes[0]);
+    }
+  }, [availableBarSizes, barSize, barType]);
 
   const barsQuery = useQuery({
     queryKey: ["bars", selectedSymbol, lookbackHours, barType, timeframe, barSize],
@@ -50,6 +79,7 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
         buildBarsParams(Number(lookbackHours), barType, timeframe, barSize),
       ),
     enabled: Boolean(selectedSymbol),
+    placeholderData: (previousData) => previousData,
   });
 
   const largeOrdersQuery = useQuery({
@@ -59,22 +89,47 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
         selectedSymbol,
         buildLargeOrdersParams(Number(lookbackHours), largeOrderThreshold),
       ),
-    enabled: Boolean(selectedSymbol),
+    enabled: Boolean(selectedSymbol) && showLargeOrders,
+    placeholderData: (previousData) => previousData,
   });
 
+  const seriesLabel = barType === "time" ? timeframe : `${barType} ${barSize}`;
+  const loadStateLabel = barsQuery.isError
+    ? "Bars unavailable"
+    : barsQuery.isFetching
+      ? "Refreshing"
+      : barsQuery.data?.bars.length
+        ? "Live"
+        : "Empty";
+
   return (
-    <section className="panel-grid">
-      <article className="panel control-panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Query controls</p>
-            <h2>{selectedSymbol || "No symbol selected"}</h2>
+    <section className="chart-workspace">
+      <header className="chart-toolbar">
+        <div className="chart-toolbar-main">
+          <div className="chart-title">
+            <p className="eyebrow">Chart</p>
+            <h2>{selectedSymbol || "No contract selected"}</h2>
           </div>
-          <span className="pill">{barsQuery.data?.bars.length ?? 0} rows</span>
-        </div>
-        <div className="form-grid">
-          <label className="field">
-            <span className="field-label">Lookback</span>
+
+          <label className="workspace-field workspace-field-symbol">
+            <span className="workspace-field-label">Symbol</span>
+            <select
+              aria-label="Select active symbol"
+              className="field-input"
+              value={selectedSymbol}
+              onChange={(event) => onSelectedSymbolChange(event.target.value)}
+            >
+              {!symbolOptions.length ? <option value="">No symbols yet</option> : null}
+              {symbolOptions.map((symbol) => (
+                <option key={symbol} value={symbol}>
+                  {symbol}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="workspace-field">
+            <span className="workspace-field-label">Lookback</span>
             <select
               className="field-input"
               value={lookbackHours}
@@ -87,8 +142,8 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
             </select>
           </label>
 
-          <label className="field">
-            <span className="field-label">Bar type</span>
+          <label className="workspace-field">
+            <span className="workspace-field-label">Bar type</span>
             <select className="field-input" value={barType} onChange={(event) => setBarType(event.target.value)}>
               <option value="time">Time</option>
               <option value="tick">Tick</option>
@@ -98,8 +153,8 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
           </label>
 
           {barType === "time" ? (
-            <label className="field">
-              <span className="field-label">Timeframe</span>
+            <label className="workspace-field">
+              <span className="workspace-field-label">Timeframe</span>
               <select className="field-input" value={timeframe} onChange={(event) => setTimeframe(event.target.value)}>
                 <option value="1m">1m</option>
                 <option value="3m">3m</option>
@@ -110,114 +165,119 @@ export default function MarketOverview({ selectedSymbol }: MarketOverviewProps) 
               </select>
             </label>
           ) : (
-            <label className="field">
-              <span className="field-label">Bar size</span>
+            <label className="workspace-field">
+              <span className="workspace-field-label">Bar size</span>
               <select className="field-input" value={barSize} onChange={(event) => setBarSize(event.target.value)}>
-                {barType === "tick" ? (
-                  <>
-                    <option value="1500">1500</option>
-                    <option value="3000">3000</option>
-                    <option value="5000">5000</option>
-                  </>
-                ) : null}
-                {barType === "volume" ? (
-                  <>
-                    <option value="500">500</option>
-                    <option value="1000">1000</option>
-                    <option value="5000">5000</option>
-                  </>
-                ) : null}
-                {barType === "range" ? (
-                  <>
-                    <option value="20">20 ticks</option>
-                    <option value="40">40 ticks</option>
-                    <option value="80">80 ticks</option>
-                  </>
-                ) : null}
+                {availableBarSizes.map((size) => (
+                  <option key={size} value={size}>
+                    {barType === "range" ? `${size} ticks` : size}
+                  </option>
+                ))}
               </select>
             </label>
           )}
 
-          <label className="field">
-            <span className="field-label">Large order threshold</span>
+          <label className="workspace-field workspace-field-threshold">
+            <span className="workspace-field-label">Large threshold</span>
             <input
               className="field-input"
+              disabled={!showLargeOrders}
+              inputMode="numeric"
               value={largeOrderThreshold}
               onChange={(event) => setLargeOrderThreshold(event.target.value)}
             />
           </label>
-        </div>
-        <p className="microcopy">
-          Bars and fixed-threshold large orders are loaded from persisted ClickHouse tables, not built on the request path.
-        </p>
-      </article>
 
-      <article className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Status</p>
-            <h2>Query health</h2>
-          </div>
-          <span className="pill">{selectedSymbol || "none"}</span>
-        </div>
-        <div className="stack">
-          <div className="list-row">
-            <strong>State</strong>
-            <span>{barsQuery.isLoading ? "Loading" : barsQuery.isError ? "Error" : "Ready"}</span>
-          </div>
-          <div className="list-row">
-            <strong>Window</strong>
-            <span>{lookbackHours}h</span>
-          </div>
-          <div className="list-row">
-            <strong>Series</strong>
-            <span>{barType === "time" ? timeframe : `${barType}:${barSize}`}</span>
-          </div>
-          <div className="list-row">
-            <strong>Large orders</strong>
-            <span>{largeOrdersQuery.data?.large_orders.length ?? 0} rows</span>
+          <div className="workspace-toggle-row">
+            <label className="workspace-toggle">
+              <input
+                checked={showVolume}
+                type="checkbox"
+                onChange={(event) => setShowVolume(event.target.checked)}
+              />
+              <span>Volume</span>
+            </label>
+            <label className="workspace-toggle">
+              <input
+                checked={showLargeOrders}
+                type="checkbox"
+                onChange={(event) => setShowLargeOrders(event.target.checked)}
+              />
+              <span>Large orders</span>
+            </label>
           </div>
         </div>
-      </article>
 
-      <article className="panel panel-wide">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Bars</p>
-            <h2>{selectedSymbol || "No symbol selected"} recent candles</h2>
-          </div>
-          <span className="pill">{barType === "time" ? timeframe : `${barType}:${barSize}`}</span>
+        <div className="chart-toolbar-meta">
+          <span className="workspace-pill">{loadStateLabel}</span>
+          <span className="workspace-pill">{seriesLabel}</span>
+          <span className="workspace-pill">{barsQuery.data?.bars.length ?? 0} bars</span>
+          {showLargeOrders ? (
+            <span className="workspace-pill">
+              {largeOrdersQuery.data?.large_orders.length ?? 0} markers
+            </span>
+          ) : null}
         </div>
-        {!selectedSymbol ? <p>Select a symbol from the sidebar to begin.</p> : null}
-        {barsQuery.isError ? <p>Unable to load bars from the Rust API.</p> : null}
-        {barsQuery.isLoading ? <p>Loading bars…</p> : null}
-        {barsQuery.data?.bars.length ? <ChartCard bars={barsQuery.data.bars} /> : null}
-      </article>
+      </header>
 
-      <article className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Large orders</p>
-            <h2>Fixed threshold overlay rows</h2>
-          </div>
-          <span className="pill">{largeOrderThreshold}</span>
-        </div>
-        {largeOrdersQuery.isError ? <p>Unable to load large orders from the Rust API.</p> : null}
-        {largeOrdersQuery.isLoading ? <p>Loading large orders…</p> : null}
-        <div className="stack">
-          {largeOrdersQuery.data?.large_orders.slice(0, 8).map((row) => (
-            <div className="job-card" key={`${row.ts}-${row.trade_price}-${row.trade_size}`}>
-              <div className="profile-header">
-                <strong>{row.side}</strong>
-                <span>{row.trade_size.toFixed(2)}</span>
-              </div>
-              <p className="microcopy">
-                {new Date(row.ts).toLocaleString()} • {row.trade_price.toFixed(2)}
-              </p>
+      <div className="chart-stage">
+        <div className="chart-surface">
+          {!selectedSymbol ? (
+            <div className="chart-empty-state">
+              <p className="eyebrow">No symbol</p>
+              <h3>Load a contract to begin.</h3>
+              <p className="microcopy">Once symbols are available, the chart toolbar becomes the control center.</p>
             </div>
-          ))}
+          ) : null}
+
+          {selectedSymbol && barsQuery.isError ? (
+            <div className="chart-empty-state">
+              <p className="eyebrow">Bars error</p>
+              <h3>Unable to load candles from the Rust API.</h3>
+              <p className="microcopy">{barsQuery.error.message}</p>
+            </div>
+          ) : null}
+
+          {selectedSymbol && !barsQuery.isError && !barsQuery.data?.bars.length ? (
+            <div className="chart-empty-state">
+              <p className="eyebrow">No bars</p>
+              <h3>No candles in the selected range.</h3>
+              <p className="microcopy">Try a wider lookback window or a different bar configuration.</p>
+            </div>
+          ) : null}
+
+          {barsQuery.data?.bars.length ? (
+            <>
+              <ChartCard
+                bars={barsQuery.data.bars}
+                largeOrders={showLargeOrders ? largeOrdersQuery.data?.large_orders ?? [] : []}
+                showLargeOrders={showLargeOrders}
+                showVolume={showVolume}
+              />
+              {barsQuery.isFetching ? <div className="chart-status-banner">Refreshing chart data…</div> : null}
+            </>
+          ) : null}
         </div>
-      </article>
+      </div>
+
+      <footer className="chart-footer">
+        <div>
+          <p className="eyebrow">Data source</p>
+          <p className="microcopy">
+            Candles and large-order overlays read from persisted market artifacts through the existing `/api/v1/markets/*` endpoints.
+          </p>
+        </div>
+        <div className="chart-footer-metrics">
+          <div className="chart-footer-card">
+            <span className="metric-label">Window</span>
+            <strong>{lookbackHours}h</strong>
+          </div>
+          <div className="chart-footer-card">
+            <span className="metric-label">Series</span>
+            <strong>{seriesLabel}</strong>
+          </div>
+        </div>
+      </footer>
     </section>
   );
 }

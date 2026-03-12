@@ -5,13 +5,13 @@ import BacktestsPanel from "./routes/BacktestsPanel";
 import DatasetsPanel from "./routes/DatasetsPanel";
 import IngestionPanel from "./routes/IngestionPanel";
 import JobsPanel from "./routes/JobsPanel";
-import MarketOverview from "./routes/MarketOverview";
+import ChartWorkspace from "./routes/MarketOverview";
 import ProfilesPanel from "./routes/ProfilesPanel";
 
-type Page = "market" | "profiles" | "ingestion" | "jobs" | "backtests" | "datasets";
+type Page = "chart" | "profiles" | "ingestion" | "jobs" | "backtests" | "datasets";
 
 export default function App() {
-  const [page, setPage] = useState<Page>("market");
+  const [page, setPage] = useState<Page>("chart");
   const [selectedSymbol, setSelectedSymbol] = useState("");
   const symbolsQuery = useQuery({
     queryKey: ["symbols"],
@@ -29,6 +29,8 @@ export default function App() {
     }
   }, [selectedSymbol, symbolsQuery.data]);
 
+  const isChartPage = page === "chart";
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -37,40 +39,29 @@ export default function App() {
             <p className="eyebrow">backtest-rust</p>
             <h1>Market Core</h1>
             <p className="muted">
-              React shell for the Rust `/api/v1` runtime. This slice covers ingestion, bars, and
-              persisted profiles.
+              Chart is the main workspace. Admin keeps the existing operational tools for ingestion,
+              jobs, backtests, datasets, and profile inspection.
             </p>
           </div>
           <div className="sidebar-card">
-            <p className="eyebrow">Active symbol</p>
-            <select
-              aria-label="Select active symbol"
-              className="field-input"
-              value={selectedSymbol}
-              onChange={(event) => setSelectedSymbol(event.target.value)}
-            >
-              {!symbolsQuery.data?.symbols.length ? <option value="">No symbols yet</option> : null}
-              {symbolsQuery.data?.symbols.map((symbol) => (
-                <option key={symbol.symbol_contract} value={symbol.symbol_contract}>
-                  {symbol.symbol_contract}
-                </option>
-              ))}
-            </select>
+            <p className="eyebrow">Current symbol</p>
+            <strong className="sidebar-symbol">{selectedSymbol || "No symbol loaded"}</strong>
             <p className="microcopy">
               {symbolsQuery.isLoading
-                ? "Loading symbols from /api/v1/symbols"
-                : `${symbolsQuery.data?.symbols.length ?? 0} known contracts`}
+                ? "Loading contracts from /api/v1/symbols"
+                : `${symbolsQuery.data?.symbols.length ?? 0} known contracts. Change it from Chart.`}
             </p>
           </div>
         </div>
         <nav className="nav">
           <button
-            className={page === "market" ? "nav-button active" : "nav-button"}
-            onClick={() => setPage("market")}
+            className={page === "chart" ? "nav-button active" : "nav-button"}
+            onClick={() => setPage("chart")}
             type="button"
           >
-            Market
+            Chart
           </button>
+          <p className="nav-section-label">Admin</p>
           <button
             className={page === "profiles" ? "nav-button active" : "nav-button"}
             onClick={() => setPage("profiles")}
@@ -110,13 +101,19 @@ export default function App() {
         <div className="sidebar-card">
           <p className="eyebrow">Runtime contract</p>
           <p className="muted">
-            Async jobs go through `/api/v1/ingestion/jobs` and `/api/v1/jobs/:job_id`. Market views
-            read persisted bars and profile artifacts.
+            Chart reads persisted market artifacts from `/api/v1/markets/*`. Admin actions continue
+            to go through the existing `/api/v1` job and export endpoints.
           </p>
         </div>
       </aside>
-      <main className="content">
-        {page === "market" ? <MarketOverview selectedSymbol={selectedSymbol} /> : null}
+      <main className={isChartPage ? "content chart-content" : "content"}>
+        {page === "chart" ? (
+          <ChartWorkspace
+            selectedSymbol={selectedSymbol}
+            onSelectedSymbolChange={setSelectedSymbol}
+            symbolOptions={symbolsQuery.data?.symbols.map((symbol) => symbol.symbol_contract) ?? []}
+          />
+        ) : null}
         {page === "profiles" ? <ProfilesPanel selectedSymbol={selectedSymbol} /> : null}
         {page === "ingestion" ? <IngestionPanel selectedSymbol={selectedSymbol} /> : null}
         {page === "jobs" ? <JobsPanel selectedSymbol={selectedSymbol} /> : null}
