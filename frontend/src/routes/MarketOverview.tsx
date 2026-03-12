@@ -25,6 +25,7 @@ const BAR_SIZE_OPTIONS = {
   volume: ["500", "1000", "5000"],
   range: ["20", "40", "80"],
 } as const;
+const BASE_LARGE_ORDER_THRESHOLD = 25;
 
 interface ChartWorkspaceProps {
   selectedSymbol: string;
@@ -43,6 +44,15 @@ function buildLargeOrdersParams(lookbackHours: number, fixedThreshold: string) {
   });
 }
 
+function normalizeLargeOrderThreshold(value: string) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < BASE_LARGE_ORDER_THRESHOLD) {
+    return BASE_LARGE_ORDER_THRESHOLD;
+  }
+
+  return numeric;
+}
+
 export default function ChartWorkspace({
   selectedSymbol,
   onSelectedSymbolChange,
@@ -55,6 +65,7 @@ export default function ChartWorkspace({
   const [largeOrderThreshold, setLargeOrderThreshold] = useState("25");
   const [showVolume, setShowVolume] = useState(true);
   const [showLargeOrders, setShowLargeOrders] = useState(false);
+  const normalizedLargeOrderThreshold = normalizeLargeOrderThreshold(largeOrderThreshold);
 
   const availableBarSizes = useMemo(
     () => (barType === "time" ? [] : [...BAR_SIZE_OPTIONS[barType as keyof typeof BAR_SIZE_OPTIONS]]),
@@ -83,15 +94,20 @@ export default function ChartWorkspace({
   });
 
   const largeOrdersQuery = useQuery({
-    queryKey: ["large-orders", selectedSymbol, lookbackHours, largeOrderThreshold],
+    queryKey: ["large-orders", selectedSymbol, lookbackHours, BASE_LARGE_ORDER_THRESHOLD],
     queryFn: () =>
       getLargeOrders(
         selectedSymbol,
-        buildLargeOrdersParams(Number(lookbackHours), largeOrderThreshold),
+        buildLargeOrdersParams(Number(lookbackHours), String(BASE_LARGE_ORDER_THRESHOLD)),
       ),
     enabled: Boolean(selectedSymbol) && showLargeOrders,
     placeholderData: (previousData) => previousData,
   });
+
+  const filteredLargeOrders = useMemo(() => {
+    const rows = largeOrdersQuery.data?.large_orders ?? [];
+    return rows.filter((row) => row.trade_size >= normalizedLargeOrderThreshold);
+  }, [largeOrdersQuery.data?.large_orders, normalizedLargeOrderThreshold]);
 
   const seriesLabel = barType === "time" ? timeframe : `${barType} ${barSize}`;
   const loadStateLabel = barsQuery.isError
@@ -183,6 +199,7 @@ export default function ChartWorkspace({
               className="field-input"
               disabled={!showLargeOrders}
               inputMode="numeric"
+              min={BASE_LARGE_ORDER_THRESHOLD}
               value={largeOrderThreshold}
               onChange={(event) => setLargeOrderThreshold(event.target.value)}
             />
@@ -214,7 +231,7 @@ export default function ChartWorkspace({
           <span className="workspace-pill">{barsQuery.data?.bars.length ?? 0} bars</span>
           {showLargeOrders ? (
             <span className="workspace-pill">
-              {largeOrdersQuery.data?.large_orders.length ?? 0} markers
+              {filteredLargeOrders.length} markers
             </span>
           ) : null}
         </div>
@@ -250,7 +267,7 @@ export default function ChartWorkspace({
             <>
               <ChartCard
                 bars={barsQuery.data.bars}
-                largeOrders={showLargeOrders ? largeOrdersQuery.data?.large_orders ?? [] : []}
+                largeOrders={showLargeOrders ? filteredLargeOrders : []}
                 showLargeOrders={showLargeOrders}
                 showVolume={showVolume}
               />
@@ -264,7 +281,7 @@ export default function ChartWorkspace({
         <div>
           <p className="eyebrow">Data source</p>
           <p className="microcopy">
-            Candles and large-order overlays read from persisted market artifacts through the existing `/api/v1/markets/*` endpoints.
+            Candles read from persisted market artifacts. Large-order markers are filtered client-side from the persisted 25+ stream until lower thresholds are rebuilt.
           </p>
         </div>
         <div className="chart-footer-metrics">
