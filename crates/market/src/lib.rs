@@ -177,67 +177,62 @@ impl ClickHouseMarketStore {
         query: &BarsQuery,
     ) -> Result<Vec<BarRecord>, ApiError> {
         if query.bar_type == "time" {
-            return self
-                .client
-                .query(
-                    r#"
-                    SELECT ts, session_date, symbol_contract, timeframe, open, high, low, close, volume, trade_count
-                    FROM bars_time
-                    WHERE symbol_contract = ?
-                      AND timeframe = ?
-                      AND ts >= parseDateTime64BestEffort(?)
-                      AND ts <= parseDateTime64BestEffort(?)
-                    ORDER BY ts
-                    LIMIT ?
-                    "#,
-                )
-                .bind(symbol)
-                .bind(query.timeframe.clone())
-                .bind(format_clickhouse_timestamp(query.start))
-                .bind(format_clickhouse_timestamp(query.end))
-                .bind(query.limit as u64)
-                .fetch_all::<BarRecord>()
-                .await
-                .map_err(map_clickhouse_err);
+            let query_text = format!(
+                r#"
+                SELECT ts, session_date, symbol_contract, timeframe, open, high, low, close, volume, trade_count
+                FROM bars_time
+                WHERE symbol_contract = '{symbol}'
+                  AND timeframe = '{timeframe}'
+                  AND ts >= parseDateTime64BestEffort('{start}')
+                  AND ts <= parseDateTime64BestEffort('{end}')
+                ORDER BY ts
+                LIMIT {limit}
+                FORMAT JSONEachRow
+                "#,
+                symbol = escape_clickhouse_string(symbol),
+                timeframe = escape_clickhouse_string(&query.timeframe),
+                start = format_clickhouse_timestamp(query.start),
+                end = format_clickhouse_timestamp(query.end),
+                limit = query.limit,
+            );
+            return self.fetch_bars_http(&query_text).await;
         }
 
         let size = query
             .bar_size
             .ok_or_else(|| ApiError::bad_request("bar_size is required for non-time bars"))?;
 
-        self.client
-            .query(
-                r#"
-                SELECT
-                    ts,
-                    session_date,
-                    symbol_contract,
-                    concat(bar_type, ':', toString(bar_size)) AS timeframe,
-                    open,
-                    high,
-                    low,
-                    close,
-                    volume,
-                    trade_count
-                FROM bars_non_time
-                WHERE symbol_contract = ?
-                  AND bar_type = ?
-                  AND bar_size = ?
-                  AND ts >= parseDateTime64BestEffort(?)
-                  AND ts <= parseDateTime64BestEffort(?)
-                ORDER BY ts
-                LIMIT ?
-                "#,
-            )
-            .bind(symbol)
-            .bind(query.bar_type.clone())
-            .bind(size)
-            .bind(format_clickhouse_timestamp(query.start))
-            .bind(format_clickhouse_timestamp(query.end))
-            .bind(query.limit as u64)
-            .fetch_all::<BarRecord>()
-            .await
-            .map_err(map_clickhouse_err)
+        let query_text = format!(
+            r#"
+            SELECT
+                ts,
+                session_date,
+                symbol_contract,
+                concat(bar_type, ':', toString(bar_size)) AS timeframe,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                trade_count
+            FROM bars_non_time
+            WHERE symbol_contract = '{symbol}'
+              AND bar_type = '{bar_type}'
+              AND bar_size = {bar_size}
+              AND ts >= parseDateTime64BestEffort('{start}')
+              AND ts <= parseDateTime64BestEffort('{end}')
+            ORDER BY ts
+            LIMIT {limit}
+            FORMAT JSONEachRow
+            "#,
+            symbol = escape_clickhouse_string(symbol),
+            bar_type = escape_clickhouse_string(&query.bar_type),
+            bar_size = size,
+            start = format_clickhouse_timestamp(query.start),
+            end = format_clickhouse_timestamp(query.end),
+            limit = query.limit,
+        );
+        self.fetch_bars_http(&query_text).await
     }
 
     pub async fn load_large_orders(
@@ -245,29 +240,27 @@ impl ClickHouseMarketStore {
         symbol: &str,
         query: &LargeOrdersQuery,
     ) -> Result<Vec<LargeOrderRecord>, ApiError> {
-        self.client
-            .query(
-                r#"
-                SELECT ts, session_date, symbol_contract, method, threshold, trade_price, trade_size, side
-                FROM large_orders
-                WHERE symbol_contract = ?
-                  AND method = ?
-                  AND threshold = ?
-                  AND ts >= parseDateTime64BestEffort(?)
-                  AND ts <= parseDateTime64BestEffort(?)
-                ORDER BY ts
-                LIMIT ?
-                "#,
-            )
-            .bind(symbol)
-            .bind(query.method.clone())
-            .bind(query.fixed_threshold)
-            .bind(format_clickhouse_timestamp(query.start))
-            .bind(format_clickhouse_timestamp(query.end))
-            .bind(query.limit as u64)
-            .fetch_all::<LargeOrderRecord>()
-            .await
-            .map_err(map_clickhouse_err)
+        let query_text = format!(
+            r#"
+            SELECT ts, session_date, symbol_contract, method, threshold, trade_price, trade_size, side
+            FROM large_orders
+            WHERE symbol_contract = '{symbol}'
+              AND method = '{method}'
+              AND threshold = {threshold}
+              AND ts >= parseDateTime64BestEffort('{start}')
+              AND ts <= parseDateTime64BestEffort('{end}')
+            ORDER BY ts
+            LIMIT {limit}
+            FORMAT JSONEachRow
+            "#,
+            symbol = escape_clickhouse_string(symbol),
+            method = escape_clickhouse_string(&query.method),
+            threshold = query.fixed_threshold,
+            start = format_clickhouse_timestamp(query.start),
+            end = format_clickhouse_timestamp(query.end),
+            limit = query.limit,
+        );
+        self.fetch_large_orders_http(&query_text).await
     }
 
     pub async fn load_preset_profiles(
@@ -275,49 +268,46 @@ impl ClickHouseMarketStore {
         symbol: &str,
         query: &PresetProfileQuery,
     ) -> Result<PresetProfilesResponse, ApiError> {
-        let mut segments = self
-            .client
-            .query(
-                r#"
-                SELECT
-                    segment_id,
-                    symbol_contract,
-                    preset,
-                    metric,
-                    profile_timezone,
-                    label,
-                    segment_start,
-                    segment_end,
-                    base_tick_size,
-                    total_value,
-                    max_value,
-                    value_area_enabled,
-                    value_area_percent,
-                    value_area_poc,
-                    value_area_low,
-                    value_area_high,
-                    value_area_volume
-                FROM profile_segments
-                WHERE symbol_contract = ?
-                  AND preset = ?
-                  AND metric = ?
-                  AND profile_timezone = ?
-                  AND segment_end >= parseDateTime64BestEffort(?)
-                  AND segment_start <= parseDateTime64BestEffort(?)
-                ORDER BY segment_end
-                LIMIT ?
-                "#,
-            )
-            .bind(symbol)
-            .bind(query.preset.clone())
-            .bind(query.metric.clone())
-            .bind(query.timezone.clone())
-            .bind(format_clickhouse_timestamp(query.start))
-            .bind(format_clickhouse_timestamp(query.end))
-            .bind(query.max_segments as u64)
-            .fetch_all::<ProfileSegmentRow>()
-            .await
-            .map_err(map_clickhouse_err)?;
+        let query_text = format!(
+            r#"
+            SELECT
+                segment_id,
+                symbol_contract,
+                preset,
+                metric,
+                profile_timezone,
+                label,
+                segment_start,
+                segment_end,
+                base_tick_size,
+                total_value,
+                max_value,
+                value_area_enabled,
+                value_area_percent,
+                value_area_poc,
+                value_area_low,
+                value_area_high,
+                value_area_volume
+            FROM profile_segments
+            WHERE symbol_contract = '{symbol}'
+              AND preset = '{preset}'
+              AND metric = '{metric}'
+              AND profile_timezone = '{timezone}'
+              AND segment_end >= parseDateTime64BestEffort('{start}')
+              AND segment_start <= parseDateTime64BestEffort('{end}')
+            ORDER BY segment_end
+            LIMIT {limit}
+            FORMAT JSONEachRow
+            "#,
+            symbol = escape_clickhouse_string(symbol),
+            preset = escape_clickhouse_string(&query.preset),
+            metric = escape_clickhouse_string(&query.metric),
+            timezone = escape_clickhouse_string(&query.timezone),
+            start = format_clickhouse_timestamp(query.start),
+            end = format_clickhouse_timestamp(query.end),
+            limit = query.max_segments,
+        );
+        let mut segments = self.fetch_profile_segments_http(&query_text).await?;
 
         if segments.is_empty() {
             return Ok(PresetProfilesResponse {
@@ -452,19 +442,17 @@ impl ClickHouseMarketStore {
         &self,
         segment_id: Uuid,
     ) -> Result<Vec<ProfileLevelBaseRow>, ApiError> {
-        self.client
-            .query(
-                r#"
-                SELECT segment_id, symbol_contract, price_level, total_volume, buy_volume, sell_volume, delta
-                FROM profile_levels_base
-                WHERE segment_id = ?
-                ORDER BY price_level
-                "#,
-            )
-            .bind(segment_id)
-            .fetch_all::<ProfileLevelBaseRow>()
-            .await
-            .map_err(map_clickhouse_err)
+        let query_text = format!(
+            r#"
+            SELECT segment_id, symbol_contract, price_level, total_volume, buy_volume, sell_volume, delta
+            FROM profile_levels_base
+            WHERE segment_id = '{segment_id}'
+            ORDER BY price_level
+            FORMAT JSONEachRow
+            "#,
+            segment_id = segment_id,
+        );
+        self.fetch_profile_levels_http(&query_text).await
     }
 
     pub async fn insert_ticks(&self, rows: &[CanonicalTickRow]) -> anyhow::Result<()> {
@@ -835,6 +823,118 @@ impl ClickHouseMarketStore {
             .await?;
         self.insert_large_orders(rows).await
     }
+
+    async fn fetch_bars_http(&self, query_text: &str) -> Result<Vec<BarRecord>, ApiError> {
+        let response = self
+            .http
+            .get(format!("{}/", self.base_url))
+            .query(&[
+                ("database", self.database.as_str()),
+                ("query", query_text),
+            ])
+            .send()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to query clickhouse bars: {error}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to read clickhouse bars response: {error}")))?;
+        if !status.is_success() {
+            return Err(ApiError::internal(format!("clickhouse query failed: {body}")));
+        }
+
+        parse_bar_rows_json_each_row(&body)
+            .map_err(|error| ApiError::internal(format!("failed to decode clickhouse bars: {error:#}")))
+    }
+
+    async fn fetch_large_orders_http(
+        &self,
+        query_text: &str,
+    ) -> Result<Vec<LargeOrderRecord>, ApiError> {
+        let response = self
+            .http
+            .get(format!("{}/", self.base_url))
+            .query(&[
+                ("database", self.database.as_str()),
+                ("query", query_text),
+            ])
+            .send()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to query clickhouse large orders: {error}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to read clickhouse large orders response: {error}")))?;
+        if !status.is_success() {
+            return Err(ApiError::internal(format!("clickhouse query failed: {body}")));
+        }
+
+        parse_large_order_rows_json_each_row(&body).map_err(|error| {
+            ApiError::internal(format!("failed to decode clickhouse large orders: {error:#}"))
+        })
+    }
+
+    async fn fetch_profile_segments_http(
+        &self,
+        query_text: &str,
+    ) -> Result<Vec<ProfileSegmentRow>, ApiError> {
+        let response = self
+            .http
+            .get(format!("{}/", self.base_url))
+            .query(&[
+                ("database", self.database.as_str()),
+                ("query", query_text),
+            ])
+            .send()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to query clickhouse profile segments: {error}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to read clickhouse profile segments response: {error}")))?;
+        if !status.is_success() {
+            return Err(ApiError::internal(format!("clickhouse query failed: {body}")));
+        }
+
+        parse_profile_segments_json_each_row(&body).map_err(|error| {
+            ApiError::internal(format!("failed to decode clickhouse profile segments: {error:#}"))
+        })
+    }
+
+    async fn fetch_profile_levels_http(
+        &self,
+        query_text: &str,
+    ) -> Result<Vec<ProfileLevelBaseRow>, ApiError> {
+        let response = self
+            .http
+            .get(format!("{}/", self.base_url))
+            .query(&[
+                ("database", self.database.as_str()),
+                ("query", query_text),
+            ])
+            .send()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to query clickhouse profile levels: {error}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ApiError::internal(format!("failed to read clickhouse profile levels response: {error}")))?;
+        if !status.is_success() {
+            return Err(ApiError::internal(format!("clickhouse query failed: {body}")));
+        }
+
+        parse_profile_levels_json_each_row(&body).map_err(|error| {
+            ApiError::internal(format!("failed to decode clickhouse profile levels: {error:#}"))
+        })
+    }
 }
 
 fn format_clickhouse_timestamp(value: DateTime<Utc>) -> String {
@@ -859,6 +959,46 @@ fn parse_tick_rows_json_each_row(body: &str) -> anyhow::Result<Vec<TickRecord>> 
     Ok(rows)
 }
 
+fn parse_bar_rows_json_each_row(body: &str) -> anyhow::Result<Vec<BarRecord>> {
+    let mut rows = Vec::new();
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let raw: ClickHouseBarRow = serde_json::from_str(line)
+            .with_context(|| "failed to parse clickhouse JSONEachRow bar")?;
+        rows.push(raw.try_into()?);
+    }
+    Ok(rows)
+}
+
+fn parse_large_order_rows_json_each_row(body: &str) -> anyhow::Result<Vec<LargeOrderRecord>> {
+    let mut rows = Vec::new();
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let raw: ClickHouseLargeOrderRow = serde_json::from_str(line)
+            .with_context(|| "failed to parse clickhouse JSONEachRow large order")?;
+        rows.push(raw.try_into()?);
+    }
+    Ok(rows)
+}
+
+fn parse_profile_segments_json_each_row(body: &str) -> anyhow::Result<Vec<ProfileSegmentRow>> {
+    let mut rows = Vec::new();
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let raw: ClickHouseProfileSegmentRow = serde_json::from_str(line)
+            .with_context(|| "failed to parse clickhouse JSONEachRow profile segment")?;
+        rows.push(raw.try_into()?);
+    }
+    Ok(rows)
+}
+
+fn parse_profile_levels_json_each_row(body: &str) -> anyhow::Result<Vec<ProfileLevelBaseRow>> {
+    let mut rows = Vec::new();
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        let raw: ClickHouseProfileLevelBaseRow = serde_json::from_str(line)
+            .with_context(|| "failed to parse clickhouse JSONEachRow profile level")?;
+        rows.push(raw.try_into()?);
+    }
+    Ok(rows)
+}
+
 fn parse_clickhouse_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
     let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
         .with_context(|| format!("invalid clickhouse timestamp: {value}"))?;
@@ -868,6 +1008,10 @@ fn parse_clickhouse_timestamp(value: &str) -> anyhow::Result<DateTime<Utc>> {
 fn parse_clickhouse_date(value: &str) -> anyhow::Result<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .with_context(|| format!("invalid clickhouse date: {value}"))
+}
+
+fn parse_clickhouse_uuid(value: &str) -> anyhow::Result<Uuid> {
+    Uuid::parse_str(value).with_context(|| format!("invalid clickhouse uuid: {value}"))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1201,6 +1345,39 @@ pub struct BarRecord {
     pub trade_count: u64,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct ClickHouseBarRow {
+    ts: String,
+    session_date: String,
+    symbol_contract: String,
+    timeframe: String,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+    trade_count: u64,
+}
+
+impl TryFrom<ClickHouseBarRow> for BarRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ClickHouseBarRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            ts: parse_clickhouse_timestamp(&value.ts)?,
+            session_date: parse_clickhouse_date(&value.session_date)?,
+            symbol_contract: value.symbol_contract,
+            timeframe: value.timeframe,
+            open: value.open,
+            high: value.high,
+            low: value.low,
+            close: value.close,
+            volume: value.volume,
+            trade_count: value.trade_count,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Row)]
 pub struct LargeOrderRecord {
     pub ts: DateTime<Utc>,
@@ -1211,6 +1388,35 @@ pub struct LargeOrderRecord {
     pub trade_price: f64,
     pub trade_size: f64,
     pub side: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ClickHouseLargeOrderRow {
+    ts: String,
+    session_date: String,
+    symbol_contract: String,
+    method: String,
+    threshold: f64,
+    trade_price: f64,
+    trade_size: f64,
+    side: String,
+}
+
+impl TryFrom<ClickHouseLargeOrderRow> for LargeOrderRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ClickHouseLargeOrderRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            ts: parse_clickhouse_timestamp(&value.ts)?,
+            session_date: parse_clickhouse_date(&value.session_date)?,
+            symbol_contract: value.symbol_contract,
+            method: value.method,
+            threshold: value.threshold,
+            trade_price: value.trade_price,
+            trade_size: value.trade_size,
+            side: value.side,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Row)]
@@ -1363,6 +1569,53 @@ pub struct ProfileSegmentRow {
     pub value_area_volume: f64,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct ClickHouseProfileSegmentRow {
+    segment_id: String,
+    symbol_contract: String,
+    preset: String,
+    metric: String,
+    profile_timezone: String,
+    label: String,
+    segment_start: String,
+    segment_end: String,
+    base_tick_size: f64,
+    total_value: f64,
+    max_value: f64,
+    value_area_enabled: bool,
+    value_area_percent: f64,
+    value_area_poc: Option<f64>,
+    value_area_low: Option<f64>,
+    value_area_high: Option<f64>,
+    value_area_volume: f64,
+}
+
+impl TryFrom<ClickHouseProfileSegmentRow> for ProfileSegmentRow {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ClickHouseProfileSegmentRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            segment_id: parse_clickhouse_uuid(&value.segment_id)?,
+            symbol_contract: value.symbol_contract,
+            preset: value.preset,
+            metric: value.metric,
+            profile_timezone: value.profile_timezone,
+            label: value.label,
+            segment_start: parse_clickhouse_timestamp(&value.segment_start)?,
+            segment_end: parse_clickhouse_timestamp(&value.segment_end)?,
+            base_tick_size: value.base_tick_size,
+            total_value: value.total_value,
+            max_value: value.max_value,
+            value_area_enabled: value.value_area_enabled,
+            value_area_percent: value.value_area_percent,
+            value_area_poc: value.value_area_poc,
+            value_area_low: value.value_area_low,
+            value_area_high: value.value_area_high,
+            value_area_volume: value.value_area_volume,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Row)]
 pub struct ProfileLevelBaseRow {
     pub segment_id: Uuid,
@@ -1372,6 +1625,33 @@ pub struct ProfileLevelBaseRow {
     pub buy_volume: f64,
     pub sell_volume: f64,
     pub delta: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ClickHouseProfileLevelBaseRow {
+    segment_id: String,
+    symbol_contract: String,
+    price_level: f64,
+    total_volume: f64,
+    buy_volume: f64,
+    sell_volume: f64,
+    delta: f64,
+}
+
+impl TryFrom<ClickHouseProfileLevelBaseRow> for ProfileLevelBaseRow {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ClickHouseProfileLevelBaseRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            segment_id: parse_clickhouse_uuid(&value.segment_id)?,
+            symbol_contract: value.symbol_contract,
+            price_level: value.price_level,
+            total_volume: value.total_volume,
+            buy_volume: value.buy_volume,
+            sell_volume: value.sell_volume,
+            delta: value.delta,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Row)]
