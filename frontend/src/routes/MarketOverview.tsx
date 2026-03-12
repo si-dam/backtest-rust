@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ChartCard from "../components/ChartCard";
-import { getBars, getLargeOrders } from "../lib/api";
+import { getBars, getLargeOrders, getPresetProfiles } from "../lib/api";
 
 function buildBarsParams(lookbackHours: number, barType: string, timeframe: string, barSize: string) {
   const end = new Date();
@@ -26,6 +26,7 @@ const BAR_SIZE_OPTIONS = {
   range: ["20", "40", "80"],
 } as const;
 const BASE_LARGE_ORDER_THRESHOLD = 25;
+const CHART_PROFILE_MAX_SEGMENTS = 12;
 
 interface ChartWorkspaceProps {
   selectedSymbol: string;
@@ -41,6 +42,29 @@ function buildLargeOrdersParams(lookbackHours: number, fixedThreshold: string) {
     end: end.toISOString(),
     method: "fixed",
     fixed_threshold: fixedThreshold,
+  });
+}
+
+function buildPresetProfileParams(
+  lookbackHours: number,
+  preset: string,
+  timezone: string,
+  metric: string,
+  tickAggregation: string,
+  valueAreaEnabled: boolean,
+) {
+  const end = new Date();
+  const start = new Date(end.getTime() - 1000 * 60 * 60 * lookbackHours);
+  return new URLSearchParams({
+    start: start.toISOString(),
+    end: end.toISOString(),
+    preset,
+    timezone,
+    metric,
+    tick_aggregation: tickAggregation,
+    value_area_enabled: String(valueAreaEnabled),
+    value_area_percent: "70",
+    max_segments: String(CHART_PROFILE_MAX_SEGMENTS),
   });
 }
 
@@ -65,6 +89,12 @@ export default function ChartWorkspace({
   const [largeOrderThreshold, setLargeOrderThreshold] = useState("25");
   const [showVolume, setShowVolume] = useState(true);
   const [showLargeOrders, setShowLargeOrders] = useState(false);
+  const [showProfiles, setShowProfiles] = useState(false);
+  const [profilePreset, setProfilePreset] = useState("day");
+  const [profileTimezone, setProfileTimezone] = useState("America/New_York");
+  const [profileMetric, setProfileMetric] = useState("volume");
+  const [profileAggregation, setProfileAggregation] = useState("1");
+  const [profileValueAreaEnabled, setProfileValueAreaEnabled] = useState(true);
   const normalizedLargeOrderThreshold = normalizeLargeOrderThreshold(largeOrderThreshold);
 
   const availableBarSizes = useMemo(
@@ -108,6 +138,35 @@ export default function ChartWorkspace({
     const rows = largeOrdersQuery.data?.large_orders ?? [];
     return rows.filter((row) => row.trade_size >= normalizedLargeOrderThreshold);
   }, [largeOrdersQuery.data?.large_orders, normalizedLargeOrderThreshold]);
+
+  const presetProfilesQuery = useQuery({
+    queryKey: [
+      "chart-preset-profiles",
+      selectedSymbol,
+      lookbackHours,
+      profilePreset,
+      profileTimezone,
+      profileMetric,
+      profileAggregation,
+      profileValueAreaEnabled,
+    ],
+    queryFn: () =>
+      getPresetProfiles(
+        selectedSymbol,
+        buildPresetProfileParams(
+          Number(lookbackHours),
+          profilePreset,
+          profileTimezone,
+          profileMetric,
+          profileAggregation,
+          profileValueAreaEnabled,
+        ),
+      ),
+    enabled: Boolean(selectedSymbol) && showProfiles,
+    placeholderData: (previousData) => previousData,
+  });
+
+  const chartProfiles = presetProfilesQuery.isError ? [] : presetProfilesQuery.data?.profiles ?? [];
 
   const seriesLabel = barType === "time" ? timeframe : `${barType} ${barSize}`;
   const loadStateLabel = barsQuery.isError
@@ -222,13 +281,80 @@ export default function ChartWorkspace({
               />
               <span>Large orders</span>
             </label>
+            <label className="workspace-toggle">
+              <input
+                checked={showProfiles}
+                type="checkbox"
+                onChange={(event) => setShowProfiles(event.target.checked)}
+              />
+              <span>Profiles</span>
+            </label>
           </div>
+
+          {showProfiles ? (
+            <>
+              <label className="workspace-field">
+                <span className="workspace-field-label">Profile preset</span>
+                <select className="field-input" value={profilePreset} onChange={(event) => setProfilePreset(event.target.value)}>
+                  <option value="day">Day</option>
+                  <option value="week">Week</option>
+                  <option value="rth">RTH</option>
+                  <option value="eth">ETH</option>
+                </select>
+              </label>
+
+              <label className="workspace-field">
+                <span className="workspace-field-label">Profile timezone</span>
+                <select
+                  className="field-input"
+                  value={profileTimezone}
+                  onChange={(event) => setProfileTimezone(event.target.value)}
+                >
+                  <option value="America/New_York">America/New_York</option>
+                  <option value="America/Chicago">America/Chicago</option>
+                  <option value="UTC">UTC</option>
+                </select>
+              </label>
+
+              <label className="workspace-field">
+                <span className="workspace-field-label">Profile metric</span>
+                <select className="field-input" value={profileMetric} onChange={(event) => setProfileMetric(event.target.value)}>
+                  <option value="volume">Volume</option>
+                  <option value="delta">Delta</option>
+                </select>
+              </label>
+
+              <label className="workspace-field">
+                <span className="workspace-field-label">Aggregation</span>
+                <select
+                  className="field-input"
+                  value={profileAggregation}
+                  onChange={(event) => setProfileAggregation(event.target.value)}
+                >
+                  <option value="1">1x</option>
+                  <option value="2">2x</option>
+                  <option value="4">4x</option>
+                  <option value="8">8x</option>
+                </select>
+              </label>
+
+              <label className="workspace-toggle">
+                <input
+                  checked={profileValueAreaEnabled}
+                  type="checkbox"
+                  onChange={(event) => setProfileValueAreaEnabled(event.target.checked)}
+                />
+                <span>Value area</span>
+              </label>
+            </>
+          ) : null}
         </div>
 
         <div className="chart-toolbar-meta">
           <span className="workspace-pill">{loadStateLabel}</span>
           <span className="workspace-pill">{seriesLabel}</span>
           <span className="workspace-pill">{barsQuery.data?.bars.length ?? 0} bars</span>
+          {showProfiles ? <span className="workspace-pill">{chartProfiles.length} profiles</span> : null}
           {showLargeOrders ? (
             <span className="workspace-pill">
               {filteredLargeOrders.length} markers
@@ -268,7 +394,10 @@ export default function ChartWorkspace({
               <ChartCard
                 bars={barsQuery.data.bars}
                 largeOrders={showLargeOrders ? filteredLargeOrders : []}
+                profiles={showProfiles ? chartProfiles : []}
+                showProfiles={showProfiles}
                 showLargeOrders={showLargeOrders}
+                showProfileValueArea={profileValueAreaEnabled}
                 showVolume={showVolume}
               />
               {barsQuery.isFetching ? <div className="chart-status-banner">Refreshing chart data…</div> : null}
@@ -281,7 +410,7 @@ export default function ChartWorkspace({
         <div>
           <p className="eyebrow">Data source</p>
           <p className="microcopy">
-            Candles read from persisted market artifacts. Large-order markers are filtered client-side from the persisted 25+ stream until lower thresholds are rebuilt.
+            Candles read from persisted market artifacts. Large-order markers are filtered client-side from the persisted 25+ stream until lower thresholds are rebuilt. Preset profiles use the persisted profile segments API for the same chart window.
           </p>
         </div>
         <div className="chart-footer-metrics">

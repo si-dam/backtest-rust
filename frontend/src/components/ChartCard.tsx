@@ -11,16 +11,21 @@ import type {
   IChartApi,
   ISeriesApi,
   ISeriesMarkersPluginApi,
+  ISeriesPrimitive,
   SeriesMarker,
   Time,
   UTCTimestamp,
 } from "lightweight-charts";
-import type { BarRecord, LargeOrderRecord } from "../lib/api";
+import type { BarRecord, LargeOrderRecord, Profile } from "../lib/api";
+import { PresetProfilesPrimitive } from "./PresetProfilesPrimitive";
 
 interface ChartCardProps {
   bars: BarRecord[];
   largeOrders: LargeOrderRecord[];
+  profiles: Profile[];
+  showProfiles: boolean;
   showLargeOrders: boolean;
+  showProfileValueArea: boolean;
   showVolume: boolean;
 }
 
@@ -65,7 +70,10 @@ function buildLargeOrderMarkers(
 export default function ChartCard({
   bars,
   largeOrders,
+  profiles,
+  showProfiles,
   showLargeOrders,
+  showProfileValueArea,
   showVolume,
 }: ChartCardProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -73,6 +81,7 @@ export default function ChartCard({
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const profilesPrimitiveRef = useRef<ISeriesPrimitive<Time> | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -133,6 +142,8 @@ export default function ChartCard({
     candleRef.current = candleSeries;
     volumeRef.current = volumeSeries;
     markersRef.current = createSeriesMarkers(candleSeries, []);
+    profilesPrimitiveRef.current = new PresetProfilesPrimitive();
+    candleSeries.attachPrimitive(profilesPrimitiveRef.current);
 
     const resizeObserver = new ResizeObserver(() => {
       if (!containerRef.current || !chartRef.current) {
@@ -154,6 +165,7 @@ export default function ChartCard({
       candleRef.current = null;
       volumeRef.current = null;
       markersRef.current = null;
+      profilesPrimitiveRef.current = null;
     };
   }, []);
 
@@ -206,6 +218,15 @@ export default function ChartCard({
 
     markersRef.current.setMarkers(buildLargeOrderMarkers(bars, largeOrders));
   }, [bars, largeOrders, showLargeOrders]);
+
+  useEffect(() => {
+    const primitive = profilesPrimitiveRef.current;
+    if (!(primitive instanceof PresetProfilesPrimitive)) {
+      return;
+    }
+
+    primitive.setData(showProfiles ? profiles : [], showProfileValueArea);
+  }, [profiles, showProfileValueArea, showProfiles]);
 
   return <div className="chart-card" ref={containerRef} />;
 }
